@@ -1,5 +1,5 @@
 //! Hover pick points (#5912): while a point input that takes them is active (Move's From and To,
-//! Measure), hovering an edge or face wakes the points it offers (`solidcraft_engine::snap`):
+//! Measure), hovering an edge, a face or a sketch curve wakes the points it offers (`solidcraft_engine::snap`):
 //! a hole's centre, an edge's middle and ends, a face's centre. Woken points are drawn as small
 //! glyphs and picked like vertices from further away, so a centre in empty space can be clicked.
 //! They stay awake across empty space and sleep when another edge or face is hovered, or when
@@ -16,6 +16,8 @@ use crate::viewport::{Hit, Proj};
 
 /// How far from the pointer a woken point is picked (screen points): twice a vertex's reach.
 pub const REACH: f32 = 16.0;
+/// Within this of the pointer a woken point wins over the edge or curve it lies on.
+pub const ON: f32 = 4.0;
 
 /// The woken points and the item that woke them.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -29,11 +31,13 @@ pub fn wanted(app: &SolveApp) -> bool {
     app.dialog.as_ref().and_then(|d| d.active_input()).is_some_and(|i| i.accept & crate::selection::SNAP_POINTS != 0)
 }
 
-/// The item a hit wakes points of: an edge or a face of a body.
+/// The item a hit wakes points of: an edge or a face of a body, or a sketch curve (a line's
+/// middle, a circle's centre).
 fn item_of(h: &Hit) -> Option<Sel> {
     match h {
         Hit::Edge { body, index, mid } => Some(Sel::Edge { body: body.clone(), index: *index, point: *mid }),
         Hit::Face { body, index, point } => Some(Sel::Face { body: body.clone(), index: *index, point: *point }),
+        Hit::SketchCurve { sketch, id, .. } => Some(Sel::ExternalSketchCurve { sketch: *sketch, id: id.clone() }),
         _ => None,
     }
 }
@@ -43,6 +47,7 @@ fn same_item(a: &Sel, b: &Sel) -> bool {
     match (a, b) {
         (Sel::Edge { body: x, index: i, .. }, Sel::Edge { body: y, index: j, .. })
         | (Sel::Face { body: x, index: i, .. }, Sel::Face { body: y, index: j, .. }) => x == y && i == j,
+        (Sel::ExternalSketchCurve { sketch: s, id: i }, Sel::ExternalSketchCurve { sketch: t, id: j }) => s == t && i == j,
         _ => false,
     }
 }

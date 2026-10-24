@@ -121,7 +121,10 @@ impl SelInput {
             Hit::SketchPoint { sketch, id, .. } if a & EXTERNAL_POINTS != 0 => Some(Sel::ExternalSketchPoint { sketch: *sketch, id: id.clone() }),
             Hit::SketchPoint { id, .. } if a & SKETCH_POINTS != 0 => Some(Sel::SketchPoint { id: id.clone() }),
             Hit::SketchPoint { sketch, id, .. } if a & POINTS != 0 => Some(Sel::SketchPoint { id: format!("{sketch}:{id}") }),
-            Hit::Vertex { body, point } if body.is_empty() && a & ORIGIN != 0 => Some(Sel::Vertex { body: String::new(), point: *point }),
+            // The origin, or a hover pick point of a sketch curve (a line's middle).
+            Hit::Vertex { body, point } if body.is_empty() && a & (ORIGIN | SNAP_POINTS) != 0 => {
+                Some(Sel::Vertex { body: String::new(), point: *point })
+            }
             Hit::Vertex { body, point } if !body.is_empty() && a & VERTICES != 0 => Some(Sel::Vertex { body: body.clone(), point: *point }),
             _ => None,
         }
