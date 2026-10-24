@@ -95,6 +95,7 @@ mod look_at_tests;
 #[cfg(test)]
 mod manage_dialogs_tests;
 mod material_card_review;
+mod material_editor;
 
 #[cfg(test)]
 mod measurement_ui_tests;
@@ -357,6 +358,8 @@ pub struct Services {
     pub show_in_folder: Option<Box<dyn Fn(&str)>>,
     /// Where the host reads the anti-aliasing preference at start (a small JSON file).
     pub graphics_path: Option<String>,
+    /// Linux: the window system this run uses, `wayland` or `x11` (Preferences shows it, #3083).
+    pub window_system: Option<&'static str>,
     /// HTTPS GET for the update check (`update`); None: never check (browser, tests).
     pub http_get: Option<update::HttpGet>,
     /// HTTPS download to a file, with progress, for one-click updates (`update::install`).
@@ -695,6 +698,12 @@ impl SolveApp {
                 None
             }
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let adapter = rs.adapter.clone();
+            let key = render_workspace::adapter_key(&adapter.get_info());
+            self.render_workspace.defer_path_host(key, move || solidcraft_gpu::path::host_on_adapter(&adapter).map_err(|e| e.to_string()));
+        }
         render_workspace::sync_backend(self);
         self.msaa_supported = rs.msaa_supported.clone();
         let info = rs.adapter.get_info();
@@ -721,6 +730,7 @@ impl SolveApp {
             "ground_shadow": self.ui.ground_shadow,
             "agent_cursor": self.ui.agent_cursor,
             "preferences": self.preferences,
+            "gpu_path_setup_seconds": self.render_workspace.setup_seconds,
         })
         .to_string()
     }
@@ -732,6 +742,9 @@ impl SolveApp {
         self.home.opened_at = v.get("recent_opened_at").and_then(|x| serde_json::from_value(x.clone()).ok()).unwrap_or_default();
         if let Some(d) = flag("dark") {
             self.ui.dark = d;
+        }
+        if let Some(t) = v.get("gpu_path_setup_seconds") {
+            self.render_workspace.setup_seconds = render_workspace::load_setup_seconds(t);
         }
         if let Some(g) = flag("grid") {
             self.ui.show_grid = g;
@@ -951,6 +964,9 @@ impl SolveApp {
         {
             let label = self.tr_label(info.label).to_string();
             self.set_status(format!("{label}: {why}"), true);
+            return;
+        }
+        if render_workspace::start_interactive(self, id) {
             return;
         }
         workspace::select_command_tab(self, id);
@@ -1333,6 +1349,10 @@ impl SolveApp {
     }
 
     pub fn fit_view(&mut self) {
+        if render_workspace::result_active(self) {
+            render_workspace::fit_result(self);
+            return;
+        }
         if dialogs_sheet::flat_active(self) {
             self.flat_view.fitted = false;
             return;
@@ -1439,6 +1459,10 @@ impl SolveApp {
 
     /// Animated view changes for the axis view and navigation bar.
     pub fn animate_view(&mut self, v: &str) {
+        if render_workspace::result_active(self) && matches!(v, "fit" | "home") {
+            render_workspace::fit_result(self);
+            return;
+        }
         // The flat pattern is a 2D view: Fit and Home frame it, and the Design camera stays put.
         if dialogs_sheet::flat_active(self) && matches!(v, "fit" | "home") {
             self.flat_view.fitted = false;

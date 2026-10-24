@@ -273,6 +273,7 @@ crate::dialog_descriptor::dialog_descriptors! {
             /// Physical material (and with it the appearance) of bodies.
             Material {
                 index: usize,
+                editor: crate::material_editor::Editor,
             },
             /// Section Analysis: cut the view by a plane, moved along its normal.
             Section {
@@ -720,7 +721,7 @@ impl Dialog {
                 Kind::Thread { designation: String::new(), length: String::new(), suggested: None, of: Vec::new() },
                 vec![SelInput::new("Cylindrical face", FACES, false)],
             ),
-            "material.assign" => Dialog::new(Kind::Material { index: 1 }, vec![SelInput::new("Bodies", BODIES, true)]),
+            "material.assign" => Dialog::new(Kind::Material { index: 1, editor: Default::default() }, vec![SelInput::new("Bodies", BODIES, true)]),
             "inspect.section" => Dialog::new(
                 Kind::Section { offset: "0 mm".into(), flip: false, hatch: true },
                 vec![SelInput::new("Plane", PLANES | PLANAR_FACES, false)],
@@ -1282,6 +1283,17 @@ impl Dialog {
         }
         if !inp.multi && !inp.items.is_empty() && self.active + 1 < self.inputs.len() {
             self.advance();
+        }
+        // Move by points or about an axis: once a body is in, go on to the empty From, Point or
+        // Axis (#6170), so the next click picks it instead of another body. Free Move's Pivot is
+        // optional and stays unvisited.
+        if let Kind::Move { mode: crate::dialogs_move::ROTATE | crate::dialogs_move::POINT_TO_POINT | crate::dialogs_move::POINT_TO_POSITION, .. } =
+            self.kind
+            && self.active == 0
+            && self.inputs.first().is_some_and(|i| !i.items.is_empty())
+            && self.inputs.get(1).is_some_and(|i| i.items.is_empty())
+        {
+            self.active = 1;
         }
         self.error = None;
         self.sync_thread(s);
@@ -2468,6 +2480,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let has_ok = !matches!(d.kind, Kind::Sketch | Kind::Measure { .. });
     let valid = match &d.kind {
         Kind::Sketch => false,
+        Kind::Material { editor, .. } if editor.editing() => false,
         Kind::SaveMesh(_) => crate::dialogs_save_mesh::ready(&d.inputs),
         Kind::SketchModify(crate::sketch_modify_ui::Mod::Corner { .. }) => {
             // Corner dialogs: preview errors are visual only; validation errors from
@@ -2486,7 +2499,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     };
     let panel = crate::ui_kit::Panel::new(&heading, egui::Id::new(("sc_dialog", title(&d.kind))), anchor, drag_bounds, side, frame)
         .actions(ok_label, close_label);
-    let panel = if matches!(d.kind, Kind::Appearance(_)) {
+    let panel = if matches!(d.kind, Kind::Appearance(_) | Kind::Material { .. }) {
         panel.width(t.form_card_width + t.form_label_width + t.space_6)
     } else if wide {
         let panel = panel.wide();
@@ -2547,7 +2560,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                     | Kind::Plastic(crate::dialogs_plastic::Pl::Rules { .. })
             );
             // A study/configuration owns Enter for its cells, including when folded.
-            let cell_enter = matches!(&d.kind, Kind::Motion(k) if k.wide());
+            let cell_enter = matches!(&d.kind, Kind::Motion(k) if k.wide()) || matches!(&d.kind, Kind::Material { editor, .. } if editor.editing());
             if cell_enter && collapsed {
                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
             }
@@ -2602,8 +2615,9 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let nothing_focused = ctx.memory(|m| m.focused().is_none());
     let canvas_enter = enter_free && ctx.memory(|m| m.had_focus_last_frame(egui::Id::new("sc_canvas_value")));
     // Tables (configurations, a study's keys) take Enter for their cells.
-    let enter_applies =
-        !matches!(d.kind, Kind::Sketch | Kind::Measure { .. } | Kind::ConfirmDelete { .. }) && !matches!(&d.kind, Kind::Motion(k) if k.wide());
+    let enter_applies = !matches!(d.kind, Kind::Sketch | Kind::Measure { .. } | Kind::ConfirmDelete { .. })
+        && !matches!(&d.kind, Kind::Motion(k) if k.wide())
+        && !matches!(&d.kind, Kind::Material { editor, .. } if editor.editing());
     let report_active = app.issue_report.draft.is_some();
     if !report_active && enter_applies && app.applying.is_none() && (enter || canvas_enter || (enter_free && nothing_focused)) {
         ok = true;
@@ -3750,7 +3764,10 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
             put(&mut p, &[("length", length)]);
             ("solid.thread", p)
         }
-        Kind::Material { index } => {
+        Kind::Material { index, editor } => {
+            if editor.editing() {
+                return Err(crate::i18n::tr("material.editor.save_or_discard").to_string());
+            }
             need(0, "bodies")?;
             let name = s.doc.material_names().get(*index).cloned().unwrap_or_else(|| solidcraft_engine::doc::DEFAULT_MATERIAL.into());
             ("material.assign", json!({"bodies": sels(d, 0).body_names(), "material": name}))
@@ -3860,7 +3877,8 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                     if let Some(error) = opts.custom_thread.as_ref().and_then(|draft| draft.error.as_ref()) {
                         return Err(error.clone());
                     }
-                    solidcraft_engine::doc::parse_metric_thread(&opts.thread).ok_or("select a valid metric thread size")?;
+                    solidcraft_engine::doc::parse_tapped_thread(&opts.thread)
+                        .ok_or("select a valid metric or catalogued UNC/UNF, G or Rp thread size")?;
                     params["thread"] = json!(opts.thread.trim());
                 }
                 match *kind {
