@@ -224,3 +224,24 @@ fn a_click_on_a_small_rim_measures_the_rim_not_its_woken_centre() {
     let picked = &h.app.dialog.as_ref().unwrap().inputs[0].items;
     assert!(matches!(picked.as_slice(), [Sel::Edge { .. }]), "{picked:?}");
 }
+
+/// In a sketch, hovering a line wakes its middle, and a click there takes the middle, not the
+/// line it lies on (#5912).
+#[test]
+fn measure_takes_a_sketch_lines_woken_middle() {
+    let mut h = Harness::new();
+    h.app.home.open = false;
+    h.app.ui.show_origin = false;
+    h.app.ui.show_browser = false;
+    h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
+    h.app.run("sketch.line", json!({"points": [[0, 0], [40, 10]]})).unwrap();
+    h.app.cam.distance = 120.0;
+    h.settle();
+    h.app.start("inspect.measure");
+    h.step(&json!({ "move": { "sketch": [10, 2.5] } })).unwrap();
+    let middle = solidcraft_engine::geom::Vec3::new(20.0, 5.0, 0.0);
+    assert!(h.app.viewport.woken.points.iter().any(|p| p.at.dist(middle) < 1e-9), "{:?}", h.app.viewport.woken);
+    h.step(&json!({ "click": { "sketch": [20, 5] } })).unwrap();
+    let picked = &h.app.dialog.as_ref().unwrap().inputs[0].items;
+    assert!(matches!(picked.as_slice(), [Sel::Vertex { point, .. }] if point.dist(middle) < 1e-9), "{picked:?}");
+}

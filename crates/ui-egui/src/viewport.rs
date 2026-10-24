@@ -1555,6 +1555,7 @@ fn pick_hits(app: &SolveApp, proj: &Proj, pos: Pos2, other_sketch_points: bool, 
             }
         }
     }
+    let curve_near = bestc.v.iter().map(|x| x.0).fold(f32::INFINITY, f32::min);
     hits.extend(bestc.hits());
     // Nearest face along the ray (hides what is behind it); with `all`, every body's nearest.
     let mut bestf: Option<(f64, Hit)> = None;
@@ -1652,14 +1653,13 @@ fn pick_hits(app: &SolveApp, proj: &Proj, pos: Pos2, other_sketch_points: bool, 
             bestv.offer(dd, Hit::Vertex { body: String::new(), point: Vec3::ZERO });
         }
     }
-    // Woken hover pick points (a hole's centre, an edge's middle), picked from further away
-    // unless an edge under the pointer is nearer (a small hole's rim stays pickable).
-    let edge_near = beste.v.iter().map(|x| x.0).fold(f32::INFINITY, f32::min);
-    for (dd, hit) in crate::snap_wake::hits(app, proj, pos) {
-        if dd < edge_near && bestv.wants(dd) {
-            bestv.offer(dd, hit);
-        }
-    }
+    // Woken hover pick points (a hole's centre, a line's middle) come first: right under the
+    // pointer over anything (a line's middle lies on the line), further out unless an edge or a
+    // sketch curve under the pointer is nearer (a small hole's rim stays pickable).
+    let edge_near = beste.v.iter().map(|x| x.0).fold(curve_near, f32::min);
+    let woken: Vec<Hit> =
+        crate::snap_wake::hits(app, proj, pos).into_iter().filter(|(dd, _)| *dd < crate::snap_wake::ON || *dd < edge_near).map(|x| x.1).collect();
+    hits.splice(0..0, woken);
     hits.extend(bestv.hits());
     hits.extend(beste.hits());
     // Origin axes.
