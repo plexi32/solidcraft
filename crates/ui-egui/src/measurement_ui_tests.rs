@@ -244,6 +244,8 @@ fn measure_takes_a_sketch_lines_woken_middle() {
     h.step(&json!({ "click": { "sketch": [20, 5] } })).unwrap();
     let picked = &h.app.dialog.as_ref().unwrap().inputs[0].items;
     assert!(matches!(picked.as_slice(), [Sel::Vertex { point, .. }] if point.dist(middle) < 1e-9), "{picked:?}");
+}
+
 /// The view numbers the picks as the panel does (#6020): "1" beside the first pick's end of the
 /// line, "2" beside the second's, in every view and whichever way round they were picked, clear
 /// of the distance label.
