@@ -40,6 +40,8 @@ pub const FEATURES: Accept = 1024;
 pub const SKETCH_POINTS: Accept = 2048;
 /// The origin point, picked as a vertex of no body (in the viewport or the browser's Origin).
 pub const ORIGIN: Accept = 4096;
+/// Hover pick points: an edge or face hovered wakes its centre, middle and ends (`snap_wake`).
+pub const SNAP_POINTS: Accept = 8192;
 /// Curves of any sketch, picked with their sketch (`ExternalSketchCurve`): curve ids are a
 /// sketch's own, so two sketches can both have a `w2` (frame member lines).
 pub const SKETCH_LINES: Accept = 8192;
