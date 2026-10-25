@@ -8,7 +8,7 @@ use solidcraft_geom::Vec2;
 
 /// Polyline samples per spline span / conic / ellipse quarter.
 const SPAN_SAMPLES: usize = 24;
-const TANGENT_HANDLE_LENGTH_SCALE: f64 = 3.5;
+const TANGENT_HANDLE_LENGTH_SCALE: f64 = 4.55;
 /// Most points a spline may have.
 pub const MAX_SPLINE_POINTS: usize = 500;
 
@@ -192,7 +192,7 @@ pub fn fit_beziers_mode(p: &[Vec2], periodic: bool) -> crate::model::Result<Vec<
     if periodic { crate::periodic_beziers(p) } else { Ok(fit_beziers(p)) }
 }
 
-/// Tangent endpoints for one editable handle at each fit point. Each handle stores 3.5 times the
+/// Tangent endpoints for one editable handle at each fit point. Each handle stores 4.55 times the
 /// natural tangent derivative per unit chord length; evaluation compensates to preserve the
 /// natural interpolant until a handle is moved.
 pub fn fit_tangent_handles(p: &[Vec2], periodic: bool) -> crate::model::Result<Vec<Vec2>> {
