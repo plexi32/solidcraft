@@ -6,8 +6,10 @@
 //! edges through vertices that only join two pieces of the same edge are counted once.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use serde::Serialize;
+use solidcraft_geom::compare::TriangleTree;
 use solidcraft_geom::{Mesh, UnitVec3, Vec3};
 
 use crate::Result;
@@ -643,44 +645,99 @@ pub struct CylinderFace {
     pub internal: bool,
 }
 
-pub fn cylinder_face_at(b: &Body, p: Vec3) -> Option<CylinderFace> {
-    let size = b.size();
-    let tol = (size * 1e-3).max(1e-3);
-    let mesh = b.tessellate(tol).ok()?;
-    // Each face's distance from the point (its nearest triangle).
-    let mut near: HashMap<u32, f64> = HashMap::new();
-    for (t, f) in mesh.triangles.iter().zip(&mesh.tri_face) {
-        let Some([a, bb, c]) = mesh.tri(t) else { continue };
-        let d = crate::boolean_guard::point_triangle_dist(p, a, bb, c);
-        near.entry(*f).and_modify(|x| *x = x.min(d)).or_insert(d);
+/// Reusable nearest-cylinder lookup for a body.
+///
+/// Building the lookup classifies its mesh once; call [`Self::at`] for each candidate point.
+pub struct CylinderFaceQuery {
+    size: f64,
+    tol: f64,
+    mesh: Arc<Mesh>,
+    surfs: Vec<Surf>,
+    cylinders: Vec<Option<CylinderFace>>,
+    triangles: TriangleTree,
+}
+
+impl CylinderFaceQuery {
+    pub fn new(b: &Body) -> Option<Self> {
+        let mesh = Arc::new(b.tessellate((b.size() * 1e-3).max(1e-3)).ok()?);
+        Some(Self::from_mesh(b, mesh))
     }
-    let nearest = near.values().copied().fold(f64::INFINITY, f64::min);
-    if nearest > size * 0.05 {
-        return None;
+
+    /// Builds a query using an existing mesh of `b`, avoiding another tessellation.
+    pub fn from_mesh(b: &Body, mesh: Arc<Mesh>) -> Self {
+        let size = b.size();
+        let tol = (size * 1e-3).max(1e-3);
+        let surfs = classify_faces(b, &mesh, b.face_count(), (size * 1e-4).max(1e-6));
+        let cylinders = cylinder_extents(&mesh, &surfs);
+        let triangles = TriangleTree::new(&mesh);
+        Self { size, tol, mesh, surfs, cylinders, triangles }
     }
-    let surfs = classify_faces(b, &mesh, b.face_count(), (size * 1e-4).max(1e-6));
-    // The facets of a curved face lie off it by up to the mesh's tolerance, so the triangle
-    // nearest a point on a hole's wall can be one of the face round its rim (they share the
-    // rim's points; in a thin plate the wall is a few long facets). Of the faces within that
-    // tolerance of the nearest, the point lies on the one whose own surface it is nearest (a
-    // cylinder: within its extent).
-    let mut faces: Vec<(u32, f64)> = near.into_iter().filter(|(_, d)| *d <= nearest + tol).collect();
-    faces.sort_by_key(|(f, _)| *f);
-    let mut best: Option<(f64, Option<CylinderFace>)> = None;
-    for (face, d) in faces {
-        let (off, cyl) = match surfs.get(face as usize) {
-            Some(Surf::Plane { n, d: k }) => (d.min((n.dot(p) - k).abs()), None),
-            Some(Surf::Cylinder { axis, p: ap, r }) => {
-                let c = cylinder_extent(&mesh, face, *axis, *ap, *r);
-                (d.min(c.off(p)), Some(c))
+
+    pub fn at(&self, p: Vec3) -> Option<CylinderFace> {
+        let mut near: HashMap<u32, f64> = HashMap::new();
+        self.triangles.within_distance(p, self.size * 0.05, |d, triangle| {
+            if let Some(face) = self.mesh.tri_face.get(triangle as usize) {
+                near.entry(*face).and_modify(|x| *x = x.min(d)).or_insert(d);
             }
-            _ => (d, None),
-        };
-        if best.as_ref().is_none_or(|(bo, _)| off < *bo) {
-            best = Some((off, cyl));
+        });
+        let nearest = near.values().copied().fold(f64::INFINITY, f64::min);
+        if nearest > self.size * 0.05 {
+            return None;
+        }
+        // The facets of a curved face lie off it by up to the mesh's tolerance, so the triangle
+        // nearest a point on a hole's wall can be one of the face round its rim (they share the
+        // rim's points; in a thin plate the wall is a few long facets). Of the faces within that
+        // tolerance of the nearest, the point lies on the one whose own surface it is nearest (a
+        // cylinder: within its extent).
+        let mut faces: Vec<(u32, f64)> = near.into_iter().filter(|(_, d)| *d <= nearest + self.tol).collect();
+        faces.sort_by_key(|(f, _)| *f);
+        let mut best: Option<(f64, Option<CylinderFace>)> = None;
+        for (face, d) in faces {
+            let (off, cyl) = match self.surfs.get(face as usize) {
+                Some(Surf::Plane { n, d: k }) => (d.min((n.dot(p) - k).abs()), None),
+                Some(Surf::Cylinder { .. }) => match self.cylinders.get(face as usize).copied().flatten() {
+                    Some(c) => (d.min(c.off(p)), Some(c)),
+                    None => (d, None),
+                },
+                _ => (d, None),
+            };
+            if best.as_ref().is_none_or(|(bo, _)| off < *bo) {
+                best = Some((off, cyl));
+            }
+        }
+        best?.1
+    }
+}
+
+pub fn cylinder_face_at(b: &Body, p: Vec3) -> Option<CylinderFace> {
+    CylinderFaceQuery::new(b)?.at(p)
+}
+
+fn cylinder_extents(mesh: &Mesh, surfs: &[Surf]) -> Vec<Option<CylinderFace>> {
+    let mut extents: Vec<_> = surfs
+        .iter()
+        .map(|surf| match surf {
+            Surf::Cylinder { axis, p, r } => Some((*axis, *p, *r, f64::INFINITY, f64::NEG_INFINITY, 0.0)),
+            _ => None,
+        })
+        .collect();
+    for (triangle, face) in mesh.triangles.iter().zip(&mesh.tri_face) {
+        let Some(Some((axis, ap, _, lo, hi, inward))) = extents.get_mut(*face as usize) else { continue };
+        for k in triangle {
+            let (Some(q), Some(n)) = (mesh.positions.get(*k as usize), mesh.normals.get(*k as usize)) else { continue };
+            let s = (*q - *ap).dot(*axis);
+            *lo = lo.min(s);
+            *hi = hi.max(s);
+            let radial = *q - *ap - *axis * s;
+            *inward += n.dot(radial);
         }
     }
-    best?.1
+    extents
+        .into_iter()
+        .map(|extent| {
+            extent.map(|(axis, ap, radius, start, end, inward)| CylinderFace { axis_point: ap, axis, radius, start, end, internal: inward < 0.0 })
+        })
+        .collect()
 }
 
 /// Face `face` of a body as a cylinder: the axis and radius of its own surface, and its extent

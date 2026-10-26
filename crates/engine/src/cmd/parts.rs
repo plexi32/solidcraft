@@ -477,11 +477,28 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
 fn hole_wall(s: &Session, a: Vec3) -> Option<Vec3> {
     let st = s.model.state();
     let dirs = [Vec3::Z * -1.0, Vec3::Z, Vec3::X, Vec3::X * -1.0, Vec3::Y, Vec3::Y * -1.0];
+    let bounds: Vec<_> = st.bodies.iter().map(|b| (b.outline_bounds(), b.body.size() * 0.05)).collect();
+    let mut queries: Vec<Option<solidcraft_doc::kernel::CylinderFaceQuery>> = std::iter::repeat_with(|| None).take(st.bodies.len()).collect();
     for step in [0.2, 0.5, 1.0, 2.0] {
-        for b in &st.bodies {
+        for (i, b) in st.bodies.iter().enumerate() {
+            let Some((bounds, reach)) = bounds.get(i) else { continue };
+            let Some(slot) = queries.get_mut(i) else { continue };
             for d in dirs {
                 let q = a + d * step;
-                if let Some(c) = solidcraft_doc::kernel::cylinder_face_at(&b.body, q) {
+                let axis_gap = |x: f64, lo: f64, hi: f64| (lo - x).max(x - hi).max(0.0);
+                if bounds.is_empty()
+                    || Vec3::new(
+                        axis_gap(q.x, bounds.min.x, bounds.max.x),
+                        axis_gap(q.y, bounds.min.y, bounds.max.y),
+                        axis_gap(q.z, bounds.min.z, bounds.max.z),
+                    )
+                    .len()
+                        > *reach
+                {
+                    continue;
+                }
+                let query = slot.get_or_insert_with(|| solidcraft_doc::kernel::CylinderFaceQuery::from_mesh(&b.body, b.mesh()));
+                if let Some(c) = query.at(q) {
                     let v = q - c.axis_point;
                     let along = v.dot(c.axis);
                     let on_wall = ((v - c.axis * along).len() - c.radius).abs() < 1e-3 && along > c.start && along < c.end;
