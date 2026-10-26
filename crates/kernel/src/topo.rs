@@ -336,13 +336,11 @@ fn fit_sphere(pts: &[Vec3]) -> Option<(Vec3, f64)> {
 fn classify_faces(b: &Body, mesh: &Mesh, nf: usize, tol: f64) -> Vec<Surf> {
     let mut pts: Vec<Vec<Vec3>> = vec![Vec::new(); nf];
     let mut nrm: Vec<Vec<Vec3>> = vec![Vec::new(); nf];
-    for (t, f) in mesh.triangles.iter().zip(&mesh.tri_face) {
-        for &k in t {
-            if let (Some(p), Some(n), Some(pv), Some(nv)) =
-                (mesh.positions.get(k as usize), mesh.normals.get(k as usize), pts.get_mut(*f as usize), nrm.get_mut(*f as usize))
-            {
-                pv.push(*p);
-                nv.push(*n);
+    for (f, verts) in face_vertices(mesh, nf).into_iter().enumerate() {
+        if let (Some(pv), Some(nv)) = (pts.get_mut(f), nrm.get_mut(f)) {
+            for (p, n) in verts {
+                pv.push(p);
+                nv.push(n);
             }
         }
     }
@@ -393,6 +391,56 @@ fn classify_faces(b: &Body, mesh: &Mesh, nf: usize, tol: f64) -> Vec<Surf> {
             _ => fit,
         })
         .collect()
+}
+
+fn classify_hole_faces(b: &Body, mesh: &Mesh, nf: usize, tol: f64) -> Vec<Surf> {
+    let verts = face_vertices(mesh, nf);
+    let exact_tol = (b.size() * 1e-7).max(1e-9) * 100.0;
+    let faces: Vec<_> = b.solid.face_iter().collect();
+    verts
+        .iter()
+        .enumerate()
+        .map(|(i, samples)| {
+            let pts: Vec<_> = samples.iter().map(|(p, _)| *p).collect();
+            let normals: Vec<_> = samples.iter().map(|(_, n)| *n).collect();
+            let fitted = classify_plane_or_cylinder(&pts, &normals, tol * 10.0, i);
+            match (fitted, faces.get(i)) {
+                (Surf::Other(_), Some(face)) => match crate::offset::surf_of(face, exact_tol) {
+                    Some(crate::offset::Surf::Plane { n, d }) => Surf::Plane { n, d },
+                    Some(crate::offset::Surf::Cylinder { o, a, r, .. }) => match a.unit() {
+                        Some(axis) => Surf::Cylinder { axis: if axis.x + axis.y * 1e-3 + axis.z * 1e-6 < 0.0 { -axis } else { axis }, p: o, r },
+                        None => fitted,
+                    },
+                    _ => fitted,
+                },
+                _ => fitted,
+            }
+        })
+        .collect()
+}
+
+fn classify_plane_or_cylinder(pts: &[Vec3], normals: &[Vec3], tol: f64, id: usize) -> Surf {
+    let (Some(&n0), Some(&p0)) = (normals.first(), pts.first()) else { return Surf::Other(id) };
+    if normals.iter().all(|n| n.dot(n0) > 1.0 - 1e-5) {
+        let n = n0.normalized().unwrap_or(Vec3::Z);
+        if pts.iter().all(|p| (p.dot(n) - p0.dot(n)).abs() < tol) {
+            return Surf::Plane { n, d: p0.dot(n) };
+        }
+    }
+    let Some(far) = normals.iter().copied().min_by(|a, b| a.dot(n0).abs().total_cmp(&b.dot(n0).abs())) else { return Surf::Other(id) };
+    let Some(axis) = n0.cross(far).unit() else { return Surf::Other(id) };
+    if !normals.iter().all(|n| n.dot(axis).abs() < 2e-3) {
+        return Surf::Other(id);
+    }
+    let u = axis.any_perp();
+    let v = axis.cross(u);
+    let projected: Vec<_> = pts.iter().map(|p| (p.dot(u), p.dot(v))).collect();
+    let Some((cu, cv, radius)) = fit_circle(&projected) else { return Surf::Other(id) };
+    if !projected.iter().all(|(x, y)| ((x - cu).hypot(y - cv) - radius).abs() < tol.max(radius * 2e-3)) {
+        return Surf::Other(id);
+    }
+    let axis = if axis.x + axis.y * 1e-3 + axis.z * 1e-6 < 0.0 { -axis } else { axis };
+    Surf::Cylinder { axis, p: u * cu + v * cv, r: radius }
 }
 
 /// Merged face/edge/vertex counts (see module docs). `mesh` must be `b.tessellate(..)`.
@@ -673,7 +721,7 @@ impl CylinderFaceQuery {
     pub fn from_mesh(b: &Body, mesh: Arc<Mesh>) -> Self {
         let size = b.size();
         let tol = (size * 1e-3).max(1e-3);
-        let surfs = classify_faces(b, &mesh, b.face_count(), (size * 1e-4).max(1e-6));
+        let surfs = classify_hole_faces(b, &mesh, b.face_count(), (size * 1e-4).max(1e-6));
         let cylinders = cylinder_extents(&mesh, &surfs);
         let triangles = TriangleTree::new(&mesh);
         Self { size, tol, mesh, surfs, cylinders, triangles }
