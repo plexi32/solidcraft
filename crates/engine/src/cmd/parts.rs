@@ -478,11 +478,10 @@ fn hole_wall(s: &Session, a: Vec3) -> Option<Vec3> {
     let st = s.model.state();
     let dirs = [Vec3::Z * -1.0, Vec3::Z, Vec3::X, Vec3::X * -1.0, Vec3::Y, Vec3::Y * -1.0];
     let bounds: Vec<_> = st.bodies.iter().map(|b| (b.outline_bounds(), b.body.size() * 0.05)).collect();
-    let mut queries: Vec<Option<solidcraft_doc::kernel::CylinderFaceQuery>> = std::iter::repeat_with(|| None).take(st.bodies.len()).collect();
     for step in [0.2, 0.5, 1.0, 2.0] {
         for (i, b) in st.bodies.iter().enumerate() {
             let Some((bounds, reach)) = bounds.get(i) else { continue };
-            let Some(slot) = queries.get_mut(i) else { continue };
+            let mut query = None;
             for d in dirs {
                 let q = a + d * step;
                 let axis_gap = |x: f64, lo: f64, hi: f64| (lo - x).max(x - hi).max(0.0);
@@ -497,7 +496,7 @@ fn hole_wall(s: &Session, a: Vec3) -> Option<Vec3> {
                 {
                     continue;
                 }
-                let query = slot.get_or_insert_with(|| solidcraft_doc::kernel::CylinderFaceQuery::from_mesh(&b.body, b.mesh()));
+                let query = query.get_or_insert_with(|| b.cylinder_face_query());
                 if let Some(c) = query.at(q) {
                     let v = q - c.axis_point;
                     let along = v.dot(c.axis);
@@ -650,9 +649,16 @@ mod tests {
         let mut s = Session::default();
         run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 10, "body_name": "Plate"}));
         run(&mut s, "solid.hole", json!({"position": [20, 15, 10], "diameter": 6.4}));
+        run(&mut s, "solid.hole", json!({"position": [10, 15, 10], "diameter": 6.4}));
         // Pick the hole's rim at the top face.
         let r = run(&mut s, "parts.insert", json!({"family": "socket_head_cap_screw", "size": "M6", "length": 20, "at": [23.2, 15, 10]}));
         assert!(r["joint"].is_number(), "{r}");
+        let second = run(
+            &mut s,
+            "parts.insert",
+            json!({"family": "socket_head_cap_screw", "size": "M6", "length": 20, "at": [13.2, 15, 10], "name": "Second screw"}),
+        );
+        assert!(second["joint"].is_number(), "{second}");
         let (lo, hi) = bbox(&s, "SHCS M6x20");
         // The head sits flush on the top face, the shank down the hole's axis.
         assert!((hi.z - 16.0).abs() < 1e-6 && (lo.z + 10.0).abs() < 1e-6, "{lo:?} {hi:?}");

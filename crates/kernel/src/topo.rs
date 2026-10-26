@@ -657,6 +657,12 @@ pub struct CylinderFaceQuery {
     triangles: TriangleTree,
 }
 
+impl std::fmt::Debug for CylinderFaceQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CylinderFaceQuery").field("size", &self.size).field("faces", &self.surfs.len()).finish()
+    }
+}
+
 impl CylinderFaceQuery {
     pub fn new(b: &Body) -> Option<Self> {
         let mesh = Arc::new(b.tessellate((b.size() * 1e-3).max(1e-3)).ok()?);
