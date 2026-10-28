@@ -251,9 +251,10 @@ fn measure_imported_stl_edges_and_vertices_from_viewport_clicks() {
     h.call("ui.view", json!({"view":"fit"}));
     h.frames(4);
 
+    // Off the edges' middles (z = 5): a click there picks the woken middle point (#5912).
     for offset in [0., 40.] {
         h.app.start("inspect.measure");
-        h.step(&json!({"click":{"world":[offset + 20.,0,5]}})).unwrap();
+        h.step(&json!({"click":{"world":[offset + 20.,0,3]}})).unwrap();
         assert!(
             matches!(h.app.dialog.as_ref().unwrap().inputs[0].items.as_slice(), [Sel::Edge { .. }]),
             "must select the outline, not the whole STL face"
@@ -262,7 +263,7 @@ fn measure_imported_stl_edges_and_vertices_from_viewport_clicks() {
         assert!((result(&h)["items"][0]["length_mm"].as_f64().unwrap() - 10.).abs() < 1e-6);
         let texts = painted_text(&mut h);
         assert!(texts.iter().any(|text| text.contains("10.00 mm")), "{texts:?}");
-        h.step(&json!({"click":{"world":[offset,0,5]}})).unwrap();
+        h.step(&json!({"click":{"world":[offset,0,3]}})).unwrap();
         assert!(h.app.dialog.as_ref().unwrap().inputs[0].items.iter().all(|s| matches!(s, Sel::Edge { .. })));
         assert!((result(&h)["distance_mm"].as_f64().unwrap() - 20.).abs() < 1e-6);
         assert!(result(&h)["angle_deg"].as_f64().unwrap().abs() < 1e-6);
