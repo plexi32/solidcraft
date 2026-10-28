@@ -8,6 +8,15 @@ const fn icon_primary(rgb: [u8; 3]) -> Color32 {
 impl Tokens {
     pub const fn light() -> Tokens {
         Tokens {
+            nav_hover: Color32::from_rgb(233, 237, 242),
+            nav_press: Color32::from_rgb(220, 226, 234),
+            nav_dim: Color32::from_rgb(136, 149, 167),
+            nav_viewport: Color32::from_rgb(238, 241, 245),
+            nav_tip: Color32::from_rgb(27, 36, 48),
+            nav_tip_ink: Color32::from_rgb(255, 255, 255),
+            nav_tip_key_border: Color32::from_rgba_unmultiplied_const(128, 140, 160, 153),
+            nav_field: Color32::from_rgb(255, 255, 255),
+
             borders: crate::theme::Borders::LEGACY,
             icon_palette: None,
             file_dim: Color32::from_rgb(58, 70, 86),
@@ -73,6 +82,7 @@ impl Tokens {
             form_ink: Color32::from_rgb(27, 36, 48),
             form_dim: Color32::from_rgb(74, 88, 104),
             form_primary: Color32::from_rgb(35, 110, 173),
+            form_primary_fill: Color32::from_rgb(35, 110, 173),
             form_error: Color32::from_rgb(161, 52, 44),
             form_error_fill: Color32::from_rgb(252, 239, 237),
             form_success: Color32::from_rgb(39, 107, 44),
@@ -155,9 +165,11 @@ impl Tokens {
             origin_plane_edge: Color32::from_rgba_unmultiplied_const(214, 140, 84, 200),
             origin_plane_hover: Color32::from_rgba_unmultiplied_const(120, 130, 230, 150),
             origin_point: Color32::from_rgb(214, 215, 218),
-            axis_x: Color32::from_rgb(255, 0, 0),
-            axis_y: Color32::from_rgb(0, 255, 0),
-            axis_z: Color32::from_rgb(2, 2, 248),
+            // The one set of X, Y and Z colours (#976), equal to the engine's `view::colors::AXIS_*`
+            // so a headless picture draws its origin axes as the window does.
+            axis_x: Color32::from_rgb(220, 60, 60),
+            axis_y: Color32::from_rgb(60, 170, 60),
+            axis_z: Color32::from_rgb(60, 100, 230),
             construction_plane: Color32::from_rgba_unmultiplied_const(249, 184, 134, 70),
             construction_geom: icon_primary(crate::icon_svg::CONSTRUCTION_PRIMARY[0]),
             body: Color32::from_rgb(176, 186, 198),
@@ -178,6 +190,7 @@ impl Tokens {
             body_selected: Color32::from_rgb(110, 170, 235),
             sketch: Color32::from_rgb(30, 90, 200),
             sketch_fixed: Color32::from_rgb(20, 20, 20),
+            sketch_halo: Color32::from_rgb(240, 243, 247),
             sketch_point: Color32::BLACK,
             sketch_locked: Color32::from_rgb(0, 140, 60),
             dimension: Color32::from_rgb(36, 40, 48),
@@ -219,8 +232,6 @@ impl Tokens {
             sketch_lost: Color32::from_rgb(200, 60, 90),
             sketch_construction: Color32::from_rgb(230, 130, 40),
             sketch_centerline: Color32::from_rgb(200, 110, 60),
-            triad: [Color32::from_rgb(220, 60, 60), Color32::from_rgb(60, 170, 60), Color32::from_rgb(60, 100, 230)],
-            gizmo: [Color32::from_rgb(225, 70, 60), Color32::from_rgb(80, 190, 80), Color32::from_rgb(70, 130, 240)],
             bend_up: Color32::from_rgb(30, 140, 50),
             bend_down: Color32::from_rgb(200, 90, 20),
             interference: Color32::from_rgb(235, 45, 40),
@@ -312,6 +323,14 @@ impl Tokens {
         t.render_ink = Color32::from_rgb(224, 116, 174);
         t.render_soft = Color32::from_rgb(64, 35, 54);
         t.tab_on_fill_dark = Color32::BLACK;
+        t.nav_hover = Color32::from_rgb(58, 65, 80);
+        t.nav_press = Color32::from_rgb(70, 78, 96);
+        t.nav_dim = Color32::from_rgb(124, 135, 154);
+        t.nav_viewport = Color32::from_rgb(38, 43, 53);
+        t.nav_tip = Color32::from_rgb(238, 241, 245);
+        t.nav_tip_ink = Color32::from_rgb(27, 36, 48);
+        t.nav_tip_key_border = Color32::from_rgba_unmultiplied_const(128, 140, 160, 153);
+        t.nav_field = Color32::from_rgb(47, 52, 62);
         t.dialog_body = Color32::from_rgb(39, 43, 52);
         t.dialog_footer = Color32::from_rgb(47, 52, 62);
         t.dialog_rule = Color32::from_rgb(53, 59, 71);
@@ -336,6 +355,7 @@ impl Tokens {
         t.body_edge = Color32::from_rgb(16, 16, 18);
         t.sketch = Color32::from_rgb(92, 150, 255);
         t.sketch_fixed = Color32::from_rgb(232, 234, 238);
+        t.sketch_halo = Color32::from_rgb(28, 32, 40);
         t.sketch_point = Color32::from_rgb(232, 234, 238);
         t.sketch_locked = Color32::from_rgb(96, 204, 116);
         t.dimension = Color32::from_rgb(224, 228, 234);
@@ -361,6 +381,7 @@ impl Tokens {
         t.form_ink = t.text;
         t.form_dim = Color32::from_rgb(180, 187, 200);
         t.form_primary = t.accent;
+        t.form_primary_fill = t.form_primary;
         t.form_error = t.error;
         t.form_error_fill = t.timeline_item_error;
         t.form_success = Color32::from_rgb(143, 219, 154);
@@ -375,9 +396,8 @@ impl Tokens {
         let mut t = self;
         let positive = [0.20, 0.45, 0.90];
         let negative = [0.85, 0.40, 0.05];
-        t.triad[0] = Color32::from_rgb(200, 40, 40);
-        t.triad[1] = Color32::from_rgb(120, 210, 80);
-        t.gizmo[1] = Color32::from_rgb(140, 220, 90);
+        t.axis_x = Color32::from_rgb(200, 40, 40);
+        t.axis_y = Color32::from_rgb(120, 210, 80);
         t.preview_sketch = Color32::from_rgb(80, 185, 145);
         t.analysis.draft = [positive, [0.95, 0.90, 0.60], negative];
         t.analysis.access = [positive, negative];
