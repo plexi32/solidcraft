@@ -332,7 +332,7 @@ fn a_click_on_a_small_rim_measures_the_rim_not_its_woken_centre() {
 fn measure_takes_a_sketch_lines_woken_middle() {
     let mut h = Harness::new();
     h.app.home.open = false;
-    h.app.ui.show_origin = false;
+    h.app.set_origin_shown(false);
     h.app.ui.show_browser = false;
     h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
     h.app.run("sketch.line", json!({"points": [[0, 0], [40, 10]]})).unwrap();

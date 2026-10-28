@@ -2485,7 +2485,7 @@ fn pick_hits(app: &SolveApp, proj: &Proj, pos: Pos2, other_sketch_points: bool, 
         }
     }
     let before_curves = hits.len();
-    let curve_near = bestc.v.iter().map(|x| x.0).fold(f32::INFINITY, f32::min);
+    let curve_near = bestc.v.iter().map(|x| x.0.1).fold(f32::INFINITY, f32::min);
     hits.extend(bestc.hits());
     if let Some((_, far)) = woken_far
         && hits.len() == before_curves
