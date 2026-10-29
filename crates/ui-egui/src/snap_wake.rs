@@ -35,7 +35,7 @@ pub fn wanted(app: &SolveApp) -> bool {
 /// middle, a circle's centre).
 fn item_of(h: &Hit) -> Option<Sel> {
     match h {
-        Hit::Edge { body, index, mid } => Some(Sel::Edge { body: body.clone(), index: *index, point: *mid }),
+        Hit::Edge { body, index, mid, .. } => Some(Sel::Edge { body: body.clone(), index: *index, point: *mid }),
         Hit::Face { body, index, point } => Some(Sel::Face { body: body.clone(), index: *index, point: *point }),
         Hit::SketchCurve { sketch, id, .. } => Some(Sel::ExternalSketchCurve { sketch: *sketch, id: id.clone() }),
         _ => None,
