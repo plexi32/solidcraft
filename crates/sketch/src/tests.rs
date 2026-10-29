@@ -1112,7 +1112,7 @@ fn wave_spline(sk: &mut Sketch, periodic: bool) -> (Vec<usize>, usize) {
         pts.pop();
         pts.push(pts[0]);
     }
-    let s = sk.add_curve(CurveKind::Spline { pts: pts.clone(), control: false, degree: 3, periodic }, None).unwrap();
+    let s = sk.add_curve(CurveKind::Spline { pts: pts.clone(), control: false, degree: 3, periodic, handles: Vec::new() }, None).unwrap();
     (pts, s)
 }
 
@@ -1152,7 +1152,7 @@ fn a_fit_point_inserted_into_a_spline_keeps_the_curve_through_its_points() {
     assert!(k.insert_spline_point(s, old[2]).is_err());
     assert_eq!(k, sk, "a refused insertion changes nothing");
     let cv: Vec<usize> = old.iter().map(|q| k.add_point(*q + v(0.0, 30.0), None).unwrap()).collect();
-    let c = k.add_curve(CurveKind::Spline { pts: cv, control: true, degree: 3, periodic: false }, None).unwrap();
+    let c = k.add_curve(CurveKind::Spline { pts: cv, control: true, degree: 3, periodic: false, handles: Vec::new() }, None).unwrap();
     assert!(k.insert_spline_point(c, v(20.0, 38.0)).is_err());
     let l = k.add_line(v(0.0, -10.0), v(50.0, -10.0), None, None, None).unwrap();
     assert!(k.insert_spline_point(l, v(20.0, -10.0)).is_err());
