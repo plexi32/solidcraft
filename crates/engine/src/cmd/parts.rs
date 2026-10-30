@@ -539,9 +539,16 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
     // Each hole's occurrence is found before the part exists, so a pick off every body fails the
     // insert before anything is made.
     let mut holes = Vec::new();
+    let mut seats: Vec<(u64, Vec3)> = Vec::new();
     for a in hole_picks(p, cmd)? {
-        let a = hole_wall(s, a).unwrap_or(a);
+        let (a, seat) = hole_wall(s, a).unwrap_or((a, a));
         let host = super::joints::occurrence_at(s, a).ok_or_else(|| bad(cmd, "no body at `at` (pick a hole's rim or wall)"))?;
+        // A rim is drawn as more than one edge, and one click on it picks them all: the picks
+        // of one rim seat one part.
+        if seats.iter().any(|(h, q)| *h == host && (*q - seat).len() < 1e-3) {
+            continue;
+        }
+        seats.push((host, seat));
         holes.push((a, host));
     }
     let name = str_(p, "name").map(str::to_string).unwrap_or_else(|| part_name(&family, &size, &sh));
@@ -614,8 +621,9 @@ fn hole_picks(p: &Value, cmd: &str) -> Result<Vec<Vec3>> {
     }
 }
 
-/// A point on the cylindrical wall of the hole at `a`, a little in from the picked rim.
-fn hole_wall(s: &Session, a: Vec3) -> Option<Vec3> {
+/// A point on the cylindrical wall of the hole at `a`, a little in from the picked rim, and the
+/// point on the hole's axis level with it (the same for every pick on one rim).
+fn hole_wall(s: &Session, a: Vec3) -> Option<(Vec3, Vec3)> {
     let st = s.model.state();
     let dirs = [Vec3::Z * -1.0, Vec3::Z, Vec3::X, Vec3::X * -1.0, Vec3::Y, Vec3::Y * -1.0];
     for step in [0.2, 0.5, 1.0, 2.0] {
@@ -627,7 +635,7 @@ fn hole_wall(s: &Session, a: Vec3) -> Option<Vec3> {
                     let along = v.dot(c.axis);
                     let on_wall = ((v - c.axis * along).len() - c.radius).abs() < 1e-3 && along > c.start && along < c.end;
                     if on_wall {
-                        return Some(q);
+                        return Some((q, c.axis_point + c.axis * along));
                     }
                 }
             }
@@ -852,7 +860,8 @@ mod tests {
     }
 
     /// Several holes in one insert: one component placed and seated once per hole, in one undo
-    /// step (#9341); a pick off every body fails the whole insert.
+    /// step (#9341); two picks of one rim are one hole; a pick off every body fails the whole
+    /// insert.
     #[test]
     fn one_insert_seats_a_screw_in_each_hole() {
         let mut s = Session::default();
@@ -867,7 +876,10 @@ mod tests {
         assert!(s.execute("parts.insert", &off).is_err());
         assert_eq!((s.doc.components.len(), s.doc.occurrences.len()), (comps, occs));
         // Each rim picked at the top face.
-        let at: Vec<_> = centres.iter().map(|(x, y)| json!([x + 1.7, y, 10])).collect();
+        // The first hole is picked twice, on both halves of its rim, as one click on a rim picks
+        // every edge of it: it still gets one screw.
+        let mut at: Vec<_> = centres.iter().map(|(x, y)| json!([x + 1.7, y, 10])).collect();
+        at.insert(1, json!([centres[0].0 - 1.7, centres[0].1, 10]));
         let r = run(&mut s, "parts.fastener", json!({"family": "socket_head_cap_screw", "size": "M3", "length": 8, "at": at}));
         assert_eq!(s.doc.components.len(), comps + 1, "one part: {r}");
         let comp = r["component"].as_u64().unwrap_or(0);
