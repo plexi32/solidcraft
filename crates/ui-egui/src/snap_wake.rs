@@ -2,6 +2,7 @@
 //! Measure), hovering an edge, a face or a sketch curve wakes the points it offers (`solidcraft_engine::snap`):
 //! a hole's centre, an edge's middle and ends, a face's centre. Woken points are drawn as small
 //! glyphs and picked like vertices from further away, so a centre in empty space can be clicked.
+//! Off unless the `hover_pick_points` preference is on.
 //! They stay awake across empty space and faces, and sleep when another edge or curve is hovered
 //! (a face only replaces a face's points), or when the input stops taking them.
 
@@ -26,9 +27,10 @@ pub struct Woken {
     pub points: Vec<SnapPoint>,
 }
 
-/// Whether the active dialog input takes hover pick points.
+/// Whether hover pick points are on and the active dialog input takes them.
 pub fn wanted(app: &SolveApp) -> bool {
-    app.dialog.as_ref().and_then(|d| d.active_input()).is_some_and(|i| i.accept & crate::selection::SNAP_POINTS != 0)
+    app.preferences.hover_pick_points
+        && app.dialog.as_ref().and_then(|d| d.active_input()).is_some_and(|i| i.accept & crate::selection::SNAP_POINTS != 0)
 }
 
 /// The item a hit wakes points of: an edge or a face of a body, or a sketch curve (a line's

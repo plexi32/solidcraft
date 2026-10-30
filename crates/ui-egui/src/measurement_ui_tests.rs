@@ -286,6 +286,7 @@ fn measure_imported_stl_edges_and_vertices_from_viewport_clicks() {
 #[test]
 fn measure_takes_woken_hole_centres() {
     let mut h = Harness::new();
+    h.app.preferences.hover_pick_points = true;
     h.app.home.open = false;
     h.app.set_origin_shown(false);
     h.app.ui.show_browser = false;
@@ -310,6 +311,7 @@ fn measure_takes_woken_hole_centres() {
 #[test]
 fn a_click_on_a_small_rim_measures_the_rim_not_its_woken_centre() {
     let mut h = Harness::new();
+    h.app.preferences.hover_pick_points = true;
     h.app.home.open = false;
     h.app.set_origin_shown(false);
     h.app.ui.show_browser = false;
@@ -332,6 +334,7 @@ fn a_click_on_a_small_rim_measures_the_rim_not_its_woken_centre() {
 #[test]
 fn measure_takes_a_sketch_lines_woken_middle() {
     let mut h = Harness::new();
+    h.app.preferences.hover_pick_points = true;
     h.app.home.open = false;
     h.app.set_origin_shown(false);
     h.app.ui.show_browser = false;

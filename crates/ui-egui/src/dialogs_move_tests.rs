@@ -544,6 +544,7 @@ fn a_pick_on_the_moved_body_is_taken_back_by_the_current_move() {
 /// A 60 × 40 × 10 plate with a Ø8 hole at (45, 20), Point to Point picking From.
 fn holed_plate_picking_from() -> crate::scenario::Harness {
     let mut h = crate::scenario::Harness::new();
+    h.app.preferences.hover_pick_points = true;
     h.app.run("solid.box", json!({"length": 60, "width": 40, "height": 10})).unwrap();
     h.app.run("solid.cylinder", json!({"radius": 4, "height": 12, "base": [45, 20, -1], "operation": "cut"})).unwrap();
     h.app.cam.distance = 160.0;
@@ -602,6 +603,21 @@ fn crossing_a_face_keeps_a_rims_centre_awake() {
     h.step(&json!({ "click": { "world": [45, 20, 10] } })).unwrap();
     let from = &h.app.dialog.as_ref().unwrap().inputs[1].items;
     assert!(matches!(from.as_slice(), [Sel::Vertex { point, .. }] if point.dist(centre) < 1e-6), "{from:?}");
+}
+
+/// With the hover pick points preference off (the default), hovering a rim wakes nothing and
+/// a click in the hole's middle picks nothing there, as before (#5912).
+#[test]
+fn hover_pick_points_stay_asleep_with_the_preference_off() {
+    assert!(!crate::prefs::Prefs::default().hover_pick_points, "off by default");
+    let mut h = holed_plate_picking_from();
+    h.app.preferences.hover_pick_points = false;
+    h.step(&json!({ "move": { "world": [49, 20, 10] } })).unwrap();
+    assert!(h.app.viewport.woken.points.is_empty(), "{:?}", h.app.viewport.woken);
+    h.step(&json!({ "click": { "world": [45, 20, 10] } })).unwrap();
+    let from = &h.app.dialog.as_ref().unwrap().inputs[1].items;
+    let centre = Vec3::new(45.0, 20.0, 10.0);
+    assert!(!from.iter().any(|s| matches!(s, Sel::Vertex { point, .. } if point.dist(centre) < 1e-6)), "{from:?}");
 }
 
 /// An input that doesn't take hover pick points (Rotate's axis) wakes none.
