@@ -2,10 +2,15 @@
 
 For UI-kit review, `ui.status_fixture {"preset":"mode"}` shows bounded status
 specimens in the real viewport. Presets are `off`, `mode`, `result`, `attention`,
-`row`, `kinds` and `key`; the reply carries the preset and item count. This
+`row`, `kinds`, `many` and `key`; the reply carries the preset and item count. This
 scenario fixture does not change engine state or open a dialog. `off` clears it.
 The published `viewport_status:<id>:item`, `:setting`, `:key` and `:close` handles
 support the ordinary `ui.at`, `ui.move`, `ui.click` and keyboard controls.
+With `viewport_status_summary` enabled, `kinds` (three) and `many` (four) exercise
+the summary component, using explicit specimen newest metadata. The
+`viewport_status:summary` and `menu:viewport_status_clear_all` handles open its
+native menu and activate its footer. These specimens are not persistent engine
+results; actual production sources currently supply at most three Mode items.
 
 Toasts the user may close have a close (×) at their top right instead of a Close button, published
 as `toast:<name>:close`: `toast:status:close`, `toast:space_mouse_offer:close` and
@@ -394,6 +399,15 @@ labels; `prefs:measure_axis_distances` identifies the checkbox.
 | `ui.resize` | `width`, `height` | |
 | `app.quit` | `force?` (quit without asking about unsaved designs) | `quitting` (the window closes), `asking` (a "save changes?" prompt is open) |
 
+For an ACP agent advertising configuration options, `ui.agent_chat` also accepts
+`{"config_option": {"id": "effort", "value": "high"}}`. Use an option ID and choice value
+from its reported `configOptions`; IDs and available values belong to the agent. The reply's
+`configOptions` is `null` for a legacy agent, or the current list of supported select options
+(including an empty list when none remain). `configPending` is true while a selection waits for
+the agent's reply. Read the confirmed state after that reply; submitting a change is not its
+confirmation. The existing `model` and `mode` inputs use the corresponding configuration option
+when advertised, and retain their existing behavior for agents using legacy lists or API endpoints.
+
 ### `ui.prefs` settings
 
 `render_previous_geometry_budget` (Graphics, default false) restores the previous fixed Render preview geometry budget: 512 MiB on 64-bit desktop, 128 MiB elsewhere. With it off, desktop uses the device-based budget.
@@ -457,6 +471,7 @@ One setting per line, sorted by name. A change that adds a setting adds its own 
 - `sketch_tab_always` (default false: the SKETCH tab stays in the ribbon right after MODEL while no sketch is open; a tool in its CREATE or REFERENCE section then opens Create Sketch, on the selected plane or planar face or else on the plane picked next, and starts in the new sketch, #7904)
 - `smooth_wheel_zoom` (default true)
 - `space_mouse_model_pivot` (default false: Classic orbit around the view's centre; true opts into Traced orbit around the model for the 3D mouse and navigation bridge)
+- `space_mouse_sketch_orbit` (default false: the 3D mouse and navigation bridge pan and zoom a sketch seen square on and turn it only after the view is tilted; true lets them turn it too, as the mouse can)
 - `stand_up_unknown` (`note` (default: a file whose header names no program known to save Y up and whose bodies seem to lie on their back (their flat area across Y outweighs their flat area facing down Z) gets a small note over the view, "Did this part open the wrong way up?", with Stand it up and Don't ask again as the handles `stand_up:stand` and `stand_up:never`, and its close (×) as `toast:stand_up:close` (also `stand_up:dismiss`); it goes by itself after 10 seconds and never blocks input), `ask` (the "Stand this part up?" dialog for every file from another program, SolidWorks too, without looking at how it rests, as before #7717), `off` (no offer); otherwise a SolidWorks file gets the dialog, or the note when its bodies clearly stand on Z already)
 - `status_bar` (default false: a thin bar along the window's bottom edge, below History, handle `status:bar`: what is being edited (`status:editing`), the open sketch's state in its colour (`status:sketch`) and the design's units (`status:units`, a click opens the Units menu, whose rows run `document.units`); the sketch's state then leaves the view's top-left corner, #7243)
 - `step_values` (default false: Up/Down and the wheel step a plain number in a focused value field)

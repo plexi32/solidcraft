@@ -281,6 +281,8 @@ pub const PAGE_SKETCH: usize = 5;
 pub const PAGE_GRAPHICS: usize = 6;
 pub const PAGE_AI: usize = 7;
 pub const PAGE_PLUGINS: usize = 8;
+/// What Preferences accepts for `parameter_list_rows`: `parameters.complete` answers at most 200.
+pub const PARAMETER_LIST_ROWS: std::ops::RangeInclusive<u16> = 5..=200;
 const WINDOW_PAGES: &[ui_kit::WindowPage<SolveApp>] = &[
     ui_kit::WindowPage { icon: "settings", label: "ui.general", group: None, handle: "prefs:page:General", scroll: true, draw: window_page::<0> },
     ui_kit::WindowPage {
@@ -917,6 +919,10 @@ preference_settings! {
     /// the turn begins (else the middle of the bodies in view), marked by a faint ball; classic
     /// (off, the default) turns it around the view's centre, as it did before.
     space_mouse_model_pivot: bool = false, PAGE_NAVIGATION;
+    /// Whether the 3D mouse also turns the view while a sketch is edited and still seen square on
+    /// (#2227), as the mouse can. Off (the default): the cap pans and zooms a square-on sketch and
+    /// turns it only after the view is tilted away from it.
+    space_mouse_sketch_orbit: bool = false, PAGE_NAVIGATION => check_id("ui.3d_mouse_sketch_orbit");
     /// Speed multiplier for 3D mouse navigation.
     space_mouse_speed: f32 = 1.0, PAGE_NAVIGATION;
     /// Per physical axis of the cap (push X, Y, Z, then tilt X, Y, Z), whether it moves the view
@@ -1006,9 +1012,16 @@ preference_settings! {
     /// Decimals shown for lengths and angles.
     length_decimals: u8 = 2, PAGE_DESIGN;
     angle_decimals: u8 = 1, PAGE_DESIGN;
+    /// The most parameters Down arrow lists in an empty expression box (#9246): fewer keeps the
+    /// list light in a large design.
+    parameter_list_rows: u16 = 50, PAGE_DESIGN;
     /// Up/Down and the wheel over a focused value field step its plain number (`value_step`,
     /// #2320). Off by default: the keys move the text cursor and the wheel scrolls, as before.
     step_values: bool = false, PAGE_DESIGN => check_id("ui.step_values");
+    /// A command's value (Extrude's Distance, Fillet's Radius…) in a box beside its handle in the
+    /// view (`canvas::boxes_shown`). Off: it is typed in the command window only, which takes the
+    /// keyboard after a pick instead, and nothing covers the model (#9479).
+    value_boxes_in_view: bool = true, PAGE_DESIGN => check_id("prefs.value_boxes_in_view");
     /// A design coming back to its tab reads again the linked designs whose files changed since
     /// it last read them. Off: they wait for Update Links, as before.
     update_changed_links: bool = true, PAGE_DESIGN => check_id("settings.update_changed_links");
@@ -1063,6 +1076,8 @@ preference_settings! {
     /// Show engine-derived persistent selection in the ribbon; off retains neutral buttons.
     persistent_ribbon_pressed: bool = true, PAGE_INTERFACE => check_id("prefs.persistent_ribbon_pressed");
     viewport_analysis_status: bool = true, PAGE_INTERFACE => check_id("prefs.viewport_analysis_status");
+    viewport_section_status: bool = true, PAGE_INTERFACE => check_id("prefs.viewport_section_status");
+    viewport_status_summary: bool = true, PAGE_INTERFACE => check_id("prefs.viewport_status_summary");
     /// Keep the SKETCH tab in the ribbon, right after MODEL, while no sketch is open; its drawing
     /// tools then start a sketch first (#7904).
     sketch_tab_always: bool = false, PAGE_INTERFACE => check_id("prefs.sketch_tab_always");
@@ -1222,6 +1237,9 @@ preference_settings! {
     /// Personal Hole parameter combinations, shared by every design in this profile.
     /// No page reset discards this user-authored library.
     hole_presets: crate::hole_presets::Library = crate::hole_presets::Library::default();
+    /// Personal Sheet Metal Rules, offered by the rule manager of every design in this profile
+    /// (#9346). No page reset discards this user-authored library.
+    personal_sheet_rules: crate::personal_sheet_rules::Library = crate::personal_sheet_rules::Library::default();
     /// Save as mesh: the last format (`stl` or `3mf`). Older versions also kept a "send to slicer"
     /// choice here (`save_mesh_send`, `save_mesh_slicer`); a settings file that still has them loads,
     /// and they are ignored.
@@ -2505,6 +2523,9 @@ fn space_mouse_rows(app: &mut SolveApp, ui: &mut egui::Ui) {
         });
         ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
             setting::space_mouse_in_view(app, ui).on_hover_text(crate::i18n::tr("ui.3d_mouse_show_in_view_tip"));
+            ui.add_enabled_ui(app.preferences.space_mouse_enabled, |ui| {
+                setting::space_mouse_sketch_orbit(app, ui).on_hover_text(crate::i18n::tr("ui.3d_mouse_sketch_orbit_tip"));
+            });
         });
     });
     // Where the picture goes, a choice that waits on the checkbox above.
@@ -2856,6 +2877,7 @@ pub fn restore_space_mouse_defaults(app: &mut SolveApp) {
     p.space_mouse_ghost_position = d.space_mouse_ghost_position;
     p.space_mouse_in_view = d.space_mouse_in_view;
     p.space_mouse_model_pivot = d.space_mouse_model_pivot;
+    p.space_mouse_sketch_orbit = d.space_mouse_sketch_orbit;
 }
 
 /// The device's picture with the coordinate circles under it, and a box with a small model that
@@ -4254,6 +4276,7 @@ mod tests {
         p.space_mouse_ghost_position = SpaceMouseGhost::LeftWindow;
         p.space_mouse_in_view = true;
         p.space_mouse_model_pivot = true;
+        p.space_mouse_sketch_orbit = true;
         let before = h.app.preferences.clone();
         let camera = h.app.cam;
         restore_space_mouse_defaults(&mut h.app);
@@ -4265,7 +4288,7 @@ mod tests {
         );
         assert_eq!((p.space_mouse_axis_speed, p.space_mouse_axis_source), (d.space_mouse_axis_speed, d.space_mouse_axis_source));
         assert_eq!((p.space_mouse_ghost_position, p.space_mouse_in_view), (d.space_mouse_ghost_position, d.space_mouse_in_view));
-        assert_eq!(p.space_mouse_model_pivot, d.space_mouse_model_pivot);
+        assert_eq!((p.space_mouse_model_pivot, p.space_mouse_sketch_orbit), (d.space_mouse_model_pivot, d.space_mouse_sketch_orbit));
         // Kept: the calibration (dead zone too), the buttons, the offered set, never, enabled, the rest of the page.
         assert_eq!(p.space_mouse_calibrations, before.space_mouse_calibrations);
         assert_eq!(p.space_mouse_buttons, before.space_mouse_buttons);
@@ -5019,6 +5042,8 @@ mod tests {
             ("ribbon_labels", json!(false), PAGE_INTERFACE),
             ("persistent_ribbon_pressed", json!(false), PAGE_INTERFACE),
             ("viewport_analysis_status", json!(false), PAGE_INTERFACE),
+            ("viewport_section_status", json!(false), PAGE_INTERFACE),
+            ("viewport_status_summary", json!(false), PAGE_INTERFACE),
             ("sketch_tab_always", json!(true), PAGE_INTERFACE),
             ("ribbon_reveal", json!(true), PAGE_INTERFACE),
             ("dialog_buttons", json!("top"), PAGE_INTERFACE),
@@ -5151,6 +5176,51 @@ mod tests {
         let p = super::lenient(&json!({"hole_presets":[row]}));
         let saved = serde_json::to_value(p.hole_presets).unwrap();
         assert_eq!(saved[0]["thread_options"]["starts"], 2, "unknown thread semantics must not silently become the defaults");
+    }
+
+    fn personal_sheet_rule_row(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name, "thickness": "1.6 mm", "k_factor": "0.42", "bend_radius": "Thickness",
+            "relief_width": "Thickness", "relief_depth": "Thickness * 0.5", "corner_relief": "Thickness * 4.0",
+            "corner_relief_shape": "round", "hem_gap": "0.01 mm", "gap": "Thickness", "angle_display": "included"
+        })
+    }
+
+    #[test]
+    fn personal_sheet_rules_corrupt_rows_and_limits_do_not_discard_other_preferences() {
+        use serde_json::json;
+        let good = personal_sheet_rule_row("CRS 1.6");
+        let mut oversized = personal_sheet_rule_row("Too long");
+        oversized["thickness"] = json!("x".repeat(513));
+        let mut duplicate = good.clone();
+        duplicate["name"] = json!("crs 1.6");
+        let p = super::lenient(&json!({"length_decimals":4,"personal_sheet_rules":[null,good,oversized,duplicate,{"name":"incomplete"}]}));
+        assert_eq!(p.length_decimals, 4);
+        assert_eq!(serde_json::to_value(&p.personal_sheet_rules).unwrap(), json!([personal_sheet_rule_row("CRS 1.6")]));
+        let corrupt = super::lenient(&json!({"length_decimals":3,"personal_sheet_rules":{"unexpected":true}}));
+        assert_eq!(corrupt.length_decimals, 3);
+        assert_eq!(serde_json::to_value(corrupt.personal_sheet_rules).unwrap(), json!([]));
+        let many: Vec<_> = (0..100).map(|i| personal_sheet_rule_row(&format!("Rule {i}"))).collect();
+        let capped = super::lenient(&json!({"personal_sheet_rules":many}));
+        assert_eq!(serde_json::to_value(capped.personal_sheet_rules).unwrap().as_array().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn personal_sheet_rules_survive_application_preferences_roundtrip_and_page_resets() {
+        use serde_json::json;
+        let mut app = crate::SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        super::set(&mut app, &json!({"personal_sheet_rules":[personal_sheet_rule_row("CRS 1.6")]})).unwrap();
+        let expected = serde_json::to_value(&app.preferences.personal_sheet_rules).unwrap();
+        assert_eq!(expected[0]["angle_display"], "included");
+        for page in 0..super::PAGES.len() {
+            super::reset_preferences(&mut app.preferences, page);
+        }
+        assert_eq!(serde_json::to_value(&app.preferences.personal_sheet_rules).unwrap(), expected);
+        let saved = app.prefs();
+        let mut other = crate::SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        other.load_prefs(&saved);
+        assert_eq!(serde_json::to_value(&other.preferences.personal_sheet_rules).unwrap(), expected);
+        assert!(other.session.doc.sheet.rules.is_empty(), "a personal rule is not a rule of the design");
     }
 
     /// The interface font (#1290): a font that can be read, or empty for the built-in one; saved
@@ -6505,6 +6575,93 @@ mod tests {
         assert!(std::iter::once(&app.session).chain(app.docs.background()).all(|s| !s.single_surface_analysis()));
         super::control(&mut app, &json!({"button":"cancel"})).unwrap();
         assert!(app.preferences.viewport_analysis_status);
+        let after: Vec<_> =
+            std::iter::once(&app.session).chain(app.docs.background()).map(|s| (s.status_items(), s.revision, s.undo.len())).collect();
+        assert_eq!(before, after, "a presentation preference never changes effects in any document");
+    }
+
+    #[test]
+    fn viewport_section_status_preference_checkbox_control_persists_cancels_and_resets() {
+        assert!(Prefs::default().viewport_section_status);
+        assert!(lenient(&json!({"theme":"light"})).viewport_section_status);
+        assert!(lenient(&json!({"viewport_section_status":"no"})).viewport_section_status);
+        let mut h = crate::scenario::Harness::new();
+        let design = h.app.session.doc.to_json();
+        let revision = h.app.session.revision;
+        h.call("ui.prefs", json!({"open":"Interface"}));
+        super::reveal_preference(&mut h, "prefs:viewport_section_status");
+        let checkbox = crate::scenario::handle_at("prefs:viewport_section_status").unwrap();
+        h.call("ui.click", json!({"x":checkbox.x,"y":checkbox.y}));
+        assert!(!h.app.preferences.viewport_section_status);
+        assert_eq!(h.call("ui.prefs", json!({}))["result"]["viewport_section_status"], false);
+        let mut restored = SolveApp::new(Default::default(), Default::default());
+        restored.load_prefs(&h.app.prefs());
+        assert!(!restored.preferences.viewport_section_status);
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert!(h.app.preferences.viewport_section_status);
+        h.call("ui.prefs", json!({"open":"Interface","viewport_section_status":false,"button":"apply"}));
+        h.call("ui.prefs", json!({"button":"defaults"}));
+        assert!(h.app.preferences.viewport_section_status);
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert!(!h.app.preferences.viewport_section_status);
+        for malformed in [json!("false"), json!(null), json!(0), json!([])] {
+            assert!(super::set(&mut h.app, &json!({"viewport_section_status":malformed})).is_err());
+            assert!(!h.app.preferences.viewport_section_status);
+        }
+        assert_eq!(h.app.session.revision, revision);
+        assert_eq!(h.app.session.doc.to_json(), design);
+    }
+
+    #[test]
+    fn viewport_status_summary_preference_checkbox_control_persists_cancels_and_resets() {
+        assert!(Prefs::default().viewport_status_summary);
+        assert!(lenient(&json!({"theme":"light"})).viewport_status_summary);
+        assert!(lenient(&json!({"viewport_status_summary":"no"})).viewport_status_summary);
+        let mut h = crate::scenario::Harness::new();
+        let design = h.app.session.doc.to_json();
+        let revision = h.app.session.revision;
+        h.call("ui.prefs", json!({"open":"Interface"}));
+        super::reveal_preference(&mut h, "prefs:viewport_status_summary");
+        let checkbox = crate::scenario::handle_at("prefs:viewport_status_summary").unwrap();
+        h.call("ui.click", json!({"x":checkbox.x,"y":checkbox.y}));
+        assert!(!h.app.preferences.viewport_status_summary);
+        assert_eq!(h.call("ui.prefs", json!({}))["result"]["viewport_status_summary"], false);
+        let mut restored = SolveApp::new(Default::default(), Default::default());
+        restored.load_prefs(&h.app.prefs());
+        assert!(!restored.preferences.viewport_status_summary);
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert!(h.app.preferences.viewport_status_summary);
+        h.call("ui.prefs", json!({"open":"Interface","viewport_status_summary":false,"button":"apply"}));
+        h.call("ui.prefs", json!({"button":"defaults"}));
+        assert!(h.app.preferences.viewport_status_summary);
+        h.call("ui.prefs", json!({"button":"cancel"}));
+        assert!(!h.app.preferences.viewport_status_summary);
+        for malformed in [json!("false"), json!(null), json!(0), json!([])] {
+            assert!(super::set(&mut h.app, &json!({"viewport_status_summary":malformed})).is_err());
+            assert!(!h.app.preferences.viewport_status_summary);
+        }
+        assert_eq!(h.app.session.revision, revision);
+        assert_eq!(h.app.session.doc.to_json(), design);
+    }
+
+    #[test]
+    fn viewport_section_status_is_independent_of_session_policy_in_background_documents() {
+        let mut app = SolveApp::new(Default::default(), Default::default());
+        super::set(&mut app, &json!({"single_surface_analysis":false,"persistent_ribbon_pressed":false})).unwrap();
+        app.run("inspect.zebra", json!({})).unwrap();
+        app.run("inspect.section", json!({"plane":"XY","at":4})).unwrap();
+        let mut other = solidcraft_engine::Session::default();
+        other.execute("inspect.draft", &json!({})).unwrap();
+        other.execute("inspect.section", &json!({"plane":"XZ","at":-3})).unwrap();
+        crate::documents::open_tab(&mut app, other).unwrap();
+        let before: Vec<_> =
+            std::iter::once(&app.session).chain(app.docs.background()).map(|s| (s.status_items(), s.revision, s.undo.len())).collect();
+        super::control(&mut app, &json!({"open":"Interface","viewport_section_status":false})).unwrap();
+        assert!(!app.preferences.viewport_section_status);
+        assert!(!app.preferences.persistent_ribbon_pressed);
+        assert!(std::iter::once(&app.session).chain(app.docs.background()).all(|s| !s.single_surface_analysis()));
+        super::control(&mut app, &json!({"button":"cancel"})).unwrap();
+        assert!(app.preferences.viewport_section_status);
         let after: Vec<_> =
             std::iter::once(&app.session).chain(app.docs.background()).map(|s| (s.status_items(), s.revision, s.undo.len())).collect();
         assert_eq!(before, after, "a presentation preference never changes effects in any document");
