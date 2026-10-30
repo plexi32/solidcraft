@@ -589,6 +589,21 @@ fn another_edge_wakes_its_own_points_and_the_rest_sleep() {
     assert!(matches!(from.as_slice(), [Sel::Vertex { point, .. }] if point.dist(middle) < 1e-6), "{from:?}");
 }
 
+/// Crossing a face on the way from a rim to its centre keeps the centre awake: only another
+/// edge or curve puts a rim's points to sleep.
+#[test]
+fn crossing_a_face_keeps_a_rims_centre_awake() {
+    let mut h = holed_plate_picking_from();
+    h.step(&json!({ "move": { "world": [49, 20, 10] } })).unwrap();
+    h.step(&json!({ "move": { "world": [53, 24, 10] } })).unwrap();
+    assert!(matches!(h.app.viewport.hover, Some(crate::viewport::Hit::Face { .. })), "{:?}", h.app.viewport.hover);
+    let centre = Vec3::new(45.0, 20.0, 10.0);
+    assert!(h.app.viewport.woken.points.iter().any(|p| p.at.dist(centre) < 1e-6), "{:?}", h.app.viewport.woken);
+    h.step(&json!({ "click": { "world": [45, 20, 10] } })).unwrap();
+    let from = &h.app.dialog.as_ref().unwrap().inputs[1].items;
+    assert!(matches!(from.as_slice(), [Sel::Vertex { point, .. }] if point.dist(centre) < 1e-6), "{from:?}");
+}
+
 /// An input that doesn't take hover pick points (Rotate's axis) wakes none.
 #[test]
 fn an_axis_input_wakes_no_points() {

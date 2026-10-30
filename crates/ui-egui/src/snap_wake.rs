@@ -2,8 +2,8 @@
 //! Measure), hovering an edge, a face or a sketch curve wakes the points it offers (`solidcraft_engine::snap`):
 //! a hole's centre, an edge's middle and ends, a face's centre. Woken points are drawn as small
 //! glyphs and picked like vertices from further away, so a centre in empty space can be clicked.
-//! They stay awake across empty space and sleep when another edge or face is hovered, or when
-//! the input stops taking them.
+//! They stay awake across empty space and faces, and sleep when another edge or curve is hovered
+//! (a face only replaces a face's points), or when the input stops taking them.
 
 use egui::{Painter, Pos2, Stroke};
 use solidcraft_engine::Sel;
@@ -52,8 +52,10 @@ fn same_item(a: &Sel, b: &Sel) -> bool {
     }
 }
 
-/// After the hover was found this frame: a newly hovered edge or face wakes its points (and the
-/// earlier ones sleep); anything else keeps them. All sleep when the input doesn't take them.
+/// After the hover was found this frame: a newly hovered edge or curve wakes its points (and the
+/// earlier ones sleep); a face does too unless an edge's or curve's points are awake, so the
+/// pointer can cross the faces between a rim and its centre. Anything else keeps them. All sleep
+/// when the input doesn't take them.
 pub fn update(app: &mut SolveApp) {
     if !wanted(app) {
         app.viewport.woken = Woken::default();
@@ -61,6 +63,10 @@ pub fn update(app: &mut SolveApp) {
     }
     let Some(item) = app.viewport.hover.as_ref().and_then(item_of) else { return };
     if app.viewport.woken.item.as_ref().is_some_and(|w| same_item(w, &item)) {
+        return;
+    }
+    let face = matches!(item, Sel::Face { .. });
+    if face && app.viewport.woken.item.as_ref().is_some_and(|w| !matches!(w, Sel::Face { .. })) {
         return;
     }
     let points = snap_points(&app.session, &item);
