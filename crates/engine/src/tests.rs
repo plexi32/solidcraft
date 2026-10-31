@@ -2345,6 +2345,8 @@ fn split_body_piece_of_a_body_moved_into_a_component_stays_there() {
 fn split_body_pieces_are_shown_where_the_body_was() {
     let mut s = Session::default();
     let (_, occurrence) = block_in_component(&mut s);
+    // The design's first part is grounded when it is made.
+    run(&mut s, "occurrence.ground", json!({"occurrence": occurrence, "grounded": false}));
     run(&mut s, "occurrence.move", json!({"occurrence": occurrence, "translate": [30, 0, 0], "capture": false}));
     let before = s.world_state().body("Block").unwrap().mesh().bounds();
     run(&mut s, "solid.split_body", json!({"body": "Block", "plane": {"origin": [34, 0, 0], "normal": [1, 0, 0]}}));
