@@ -332,6 +332,8 @@ fn feature_row(
             eye,
             icon,
             label: &label,
+            name: true,
+            rename: true,
             selected,
             dim: dim || (!is_sketch && eye == Some(false)),
             cut,
@@ -371,7 +373,10 @@ fn feature_row(
             app.tree.timeline_reveal = None;
         }
     }
-    if r.double {
+    if r.slow_rename {
+        click_select(app, ui, order_key, Some(Sel::Feature { id }));
+        start_inline_rename(app, crate::context_menu::RenameWhat::Feature(id), &r);
+    } else if r.double {
         // Inside a placement, the feature's component is active while it is edited, and the one
         // active before comes back when the editor ends (#12720).
         app.edit_feature_in(id, Some((component, path)));
@@ -384,6 +389,7 @@ fn feature_row(
         acts.hover_feature = Some(id);
         acts.hovered = true;
     }
+    inline_rename(app, ui, &r, &label);
     if let Some(at) = r.secondary {
         acts.menu = Some((at, if is_sketch { Target::Sketch { id } } else { Target::Feature { id } }));
     }
