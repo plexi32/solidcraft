@@ -42,8 +42,7 @@ use std::f64::consts::TAU;
 
 pub use crate::assembly::Solid;
 use crate::assembly::{
-    Assembly, Bound, EdgeB, Kind, MAX_SPLINE_DEGREE, MAX_SPLINE_POINTS, MAX_TOLERANCE, VERTEX_GAP_MARGIN, index, reverse, spline_curve,
-    spline_surface, transposed, unsupported, v3,
+    Assembly, Bound, EdgeB, Kind, MAX_SPLINE_DEGREE, MAX_SPLINE_POINTS, index, reverse, spline_curve, spline_surface, transposed, unsupported, v3,
 };
 use crate::kernel::{CurveEval, SurfaceEval};
 use solidcore_ops::pcurve::Trims;
@@ -687,7 +686,7 @@ impl<'b, 'a> Builder<'b, 'a> {
         // Topology first: a straight edge whose vertices lie off its LINE (a direction or a
         // magnitude written wrong) is the segment between its vertices, which the faces it
         // bounds share; any other curve is the edge's shape, and a vertex far off it is refused.
-        let far = gaps.iter().any(|g| !(VERTEX_GAP_MARGIN * g <= MAX_TOLERANCE));
+        let far = gaps.iter().any(|g| crate::assembly::vertex_tolerance(*g).is_none());
         if far && matches!(curve, BCurve::Line { .. }) && !closed && ps != pe {
             let [a, z] = vertices;
             curve = BCurve::Line { start: self.asm.point(a)?, end: self.asm.point(z)? };

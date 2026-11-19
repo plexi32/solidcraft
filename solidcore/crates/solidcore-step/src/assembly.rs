@@ -53,18 +53,42 @@ pub(crate) const MAX_SPLINE_DEGREE: usize = 16;
 /// EDGE_TOLERANCE and VERTEX_TOLERANCE). Geometry that
 /// would need more is refused, with how far off it lies.
 pub(crate) const MAX_TOLERANCE: f64 = 1.0;
-/// A vertex's tolerance over its largest gap from its curves and surfaces.
-pub(crate) const VERTEX_GAP_MARGIN: f64 = 1.5;
-/// Intervals an edge's curve is measured over against each face's surface it bounds.
+/// The most an edge's or vertex's tolerance may be over its body's: SMLib's check takes no edge or
+/// vertex zone of 1000 times the body's or more; 250 keeps a margin of four (#11997).
+const BODY_TOLERANCE_RATIO: f64 = 250.0;
+/// A body's tolerance over the largest gap of a vertex from its faces.
+const BODY_VERTEX_GAP_MARGIN: f64 = 2.0;
+/// A vertex's tolerance over its largest gap from its curves and surfaces: twice an edge's.
+pub(crate) const VERTEX_GAP_MARGIN: f64 = 2.0 * pcurve::SURFACE_GAP_MARGIN;
+/// The least margin a vertex is kept with ([`vertex_tolerance`]).
+pub(crate) const VERTEX_GAP_LEAST_MARGIN: f64 = 1.5;
+
+/// The tolerance a vertex `gap` mm off its curves and surfaces takes: [`VERTEX_GAP_MARGIN`] times
+/// it, at most [`MAX_TOLERANCE`]; `None` when even [`VERTEX_GAP_LEAST_MARGIN`] would pass it.
+pub(crate) fn vertex_tolerance(gap: f64) -> Option<f64> {
+    (VERTEX_GAP_LEAST_MARGIN * gap <= MAX_TOLERANCE).then(|| (VERTEX_GAP_MARGIN * gap).min(MAX_TOLERANCE))
+}
+/// Intervals an edge's curve is measured over against each face's surface it bounds, at the
+/// least: each knot span of the edge's curve and pcurve is measured too ([`widest_gap`]).
 pub(crate) const EDGE_GAP_SAMPLES: usize = 16;
+/// Points measured inside each knot span between two breaks ([`widest_gap`]).
+const EDGE_GAP_SPAN_SAMPLES: usize = 4;
+/// Breaks past which an edge's spans are measured at evenly spaced points instead.
+const EDGE_GAP_MAX_BREAKS: usize = 1024;
+/// Local maxima of the measured gaps refined to the gap's peak.
+const EDGE_GAP_REFINED: usize = 4;
+/// Golden-section steps refining a local maximum.
+const EDGE_GAP_REFINE_STEPS: usize = 24;
+/// The least margin an edge is kept with ([`Assembly::cover_edge`]).
+const EDGE_GAP_LEAST_MARGIN: f64 = 1.5;
 /// The least span of a face's parameter box along a direction of its surface that is not
 /// closed on itself, where its natural range has room ([`face_domain`]): 50 times the 2e-5 mm
 /// within which SMLib takes two of a surface's sides for one (#12757: a planar sliver face
 /// 1e-5 mm wide).
 pub(crate) const OPEN_DOMAIN_SPAN: f64 = 1e-3;
-/// An edge's tolerance over the largest gap measured between its pcurves and its curve, as the
-/// record check measures it: with margin, as a vertex's.
-pub(crate) const EDGE_GAP_MARGIN: f64 = 1.5;
+/// An edge's tolerance over the largest gap measured between its pcurves and its curve: SMLib's
+/// zone covers the gap with margin, as a surface's.
+pub(crate) const EDGE_GAP_MARGIN: f64 = pcurve::SURFACE_GAP_MARGIN;
 
 /// A body (a solid or a sheet) assembled into a record ([`Assembly::finish`]).
 #[derive(Clone, Debug)]
@@ -208,6 +232,8 @@ pub struct Assembly<'t> {
     pub(crate) splines_closed: usize,
     /// Edges whose tolerance was raised to the gap their curve has to a face's surface.
     pub(crate) raised_edges: HashSet<u32>,
+    /// The largest gap of a raised edge.
+    pub(crate) widest_gap: f64,
 }
 
 impl<'t> Assembly<'t> {
@@ -229,6 +255,7 @@ impl<'t> Assembly<'t> {
             edges_turned: 0,
             splines_closed: 0,
             raised_edges: HashSet::new(),
+            widest_gap: 0.0,
         }
     }
 
@@ -437,11 +464,11 @@ impl<'t> Assembly<'t> {
     /// A vertex `gap` mm from where its edge's curve puts it: refused if far off, else its
     /// tolerance covers the gap.
     pub(crate) fn raise_vertex(&mut self, v: u32, gap: f64, edge: u64) -> R<()> {
-        if !(VERTEX_GAP_MARGIN * gap <= MAX_TOLERANCE) {
+        let Some(tolerance) = vertex_tolerance(gap) else {
             return Err(format!("edge #{edge}: a vertex lies {gap} mm off its curve"));
-        }
+        };
         if let Some(x) = self.vertices.get_mut(v as usize) {
-            x.tolerance = x.tolerance.max(VERTEX_GAP_MARGIN * gap);
+            x.tolerance = x.tolerance.max(tolerance);
         }
         Ok(())
     }
@@ -480,33 +507,38 @@ impl<'t> Assembly<'t> {
                     None => (&edge.curve, edge.interval),
                 };
                 let eval = CurveEval::new(curve).map_err(|m| m.to_string())?;
-                let mut gap = 0.0f64;
-                for k in 0..=EDGE_GAP_SAMPLES {
-                    let t = if k == EDGE_GAP_SAMPLES { t1 } else { t0 + (t1 - t0) * (k as f64 / EDGE_GAP_SAMPLES as f64) };
-                    let Some(p) = eval.point(t) else { continue };
+                let gap = widest_gap([t0, t1], &[curve_breaks(curve)], |t| {
+                    let p = eval.point(t)?;
                     // A point with no nearest point is the pcurves' to refuse, with why.
-                    let Some(s) = on.project_with(&starts, p, None, f64::INFINITY).and_then(|q| on.point(q)) else { continue };
-                    gap = gap.max(s.dist(p));
-                }
-                self.cover_edge(e, gap, pcurve::SURFACE_GAP_MARGIN)?;
+                    let s = on.project_with(&starts, p, None, f64::INFINITY).and_then(|q| on.point(q))?;
+                    Some(s.dist(p))
+                });
+                self.cover_edge(e, gap, pcurve::SURFACE_GAP_MARGIN, true)?;
             }
         }
         Ok(())
     }
 
-    /// Edge `e`'s tolerance covers `gap` with `margin`: refused if far off.
-    fn cover_edge(&mut self, e: u32, gap: f64, margin: f64) -> R<()> {
+    /// Edge `e`'s tolerance covers `gap` with `margin`: refused if far off. The notes count it when
+    /// the gap is the file's own (`own`) or past the file's uncertainty.
+    fn cover_edge(&mut self, e: u32, gap: f64, margin: f64, own: bool) -> R<()> {
+        let tol = self.tol;
         let Some(x) = self.edges.get_mut(e as usize) else { return Err("edge reference".into()) };
-        if margin * gap <= x.tolerance {
-            return Ok(());
-        }
-        if !(margin * gap <= MAX_TOLERANCE) {
+        if !(EDGE_GAP_LEAST_MARGIN * gap <= MAX_TOLERANCE) {
             return Err(format!("an edge lies {gap} mm off the face's surface"));
         }
-        x.tolerance = margin * gap;
-        let (tolerance, ends) = (x.tolerance, x.vertices);
-        self.raised_edges.insert(e);
+        let wanted = (margin * gap).min(MAX_TOLERANCE);
+        if wanted <= x.tolerance {
+            return Ok(());
+        }
+        x.tolerance = wanted;
+        let ends = x.vertices;
+        if own || gap > tol {
+            self.raised_edges.insert(e);
+            self.widest_gap = self.widest_gap.max(gap);
+        }
         // A vertex's tolerance covers every edge that meets it, as in any tolerant record.
+        let tolerance = vertex_tolerance(gap).unwrap_or(MAX_TOLERANCE);
         for v in ends {
             if let Some(vx) = self.vertices.get_mut(v as usize) {
                 vx.tolerance = vx.tolerance.max(tolerance);
@@ -558,16 +590,16 @@ impl<'t> Assembly<'t> {
                     None => (&edge.curve, edge.interval),
                 };
                 let eval = CurveEval::new(curve).map_err(|m| m.to_string())?;
-                let mut gap = 0.0f64;
-                for k in 0..=EDGE_GAP_SAMPLES {
-                    let t = if k == EDGE_GAP_SAMPLES { t1 } else { t0 + (t1 - t0) * (k as f64 / EDGE_GAP_SAMPLES as f64) };
+                let pc_knots = match c {
+                    Curve2::Spline { knots, .. } | Curve2::RationalSpline { knots, .. } => knots.as_slice(),
+                };
+                let gap = widest_gap([t0, t1], &[curve_breaks(curve), pc_knots], |t| {
                     // A point a pcurve or surface lacks is the record check's to name.
-                    let (Some(q), Some(p)) = (solidcore_ops::pcurve::eval(c, t), eval.point(t)) else { continue };
-                    if let Some(s) = on.point(q) {
-                        gap = gap.max(s.dist(p));
-                    }
-                }
-                self.cover_edge(e, gap, EDGE_GAP_MARGIN)?;
+                    let q = solidcore_ops::pcurve::eval(c, t)?;
+                    let p = eval.point(t)?;
+                    Some(on.point(q)?.dist(p))
+                });
+                self.cover_edge(e, gap, EDGE_GAP_MARGIN, false)?;
             }
         }
         Ok(())
@@ -687,11 +719,11 @@ impl<'t> Assembly<'t> {
             return Err(format!("pcurves failed on {failed} of {} faces; first: {first}", self.faces.len()));
         }
         if !self.raised_edges.is_empty() {
-            let most = self.raised_edges.iter().filter_map(|&e| self.edges.get(e as usize)).map(|e| e.tolerance).fold(0.0, f64::max);
             notes.push(format!(
-                "{} edges lie off their faces' surfaces by more than {} mm: their tolerances are the gaps they have (up to {most:.3e} mm)",
+                "{} edges lie off their faces' surfaces farther than {} mm covers: their tolerances cover the gaps they have (up to {:.3e} mm)",
                 self.raised_edges.len(),
-                self.tol
+                self.tol,
+                self.widest_gap
             ));
         }
         if self.loops_joined > 0 {
@@ -899,12 +931,46 @@ impl<'t> Assembly<'t> {
                 {
                     let p = v3(x.point);
                     let gap = surface.project(p, None, f64::INFINITY).and_then(|q| surface.point(q)).map_or(f64::INFINITY, |s| s.dist(p));
-                    if !(VERTEX_GAP_MARGIN * gap <= MAX_TOLERANCE) {
+                    let Some(tolerance) = vertex_tolerance(gap) else {
                         return Err(format!("face #{}: a vertex loop's vertex lies {gap} mm off its surface", face.origin));
-                    }
-                    x.tolerance = x.tolerance.max(VERTEX_GAP_MARGIN * gap);
+                    };
+                    x.tolerance = x.tolerance.max(tolerance);
                 }
             }
+        }
+
+        // The body's tolerance covers its raised vertices' gaps from their faces and keeps its
+        // edges' and vertices' tolerances within SMLib's ratio (#11997).
+        let mut vertex_gap = 0.0f64;
+        for &f in &face_order {
+            let Some(face) = self.faces.get(f as usize) else { continue };
+            let mut raised = Vec::new();
+            for l in &face.loops {
+                match l {
+                    Bound::Vertex(v) => raised.push(*v),
+                    Bound::Edges(es) => raised.extend(es.iter().filter_map(|&(e, _)| self.edges.get(e as usize)).flat_map(|x| x.vertices)),
+                }
+            }
+            raised.retain(|&v| self.vertices.get(v as usize).is_some_and(|x| x.tolerance > self.tol));
+            if raised.is_empty() {
+                continue;
+            }
+            let surface = SurfaceEval::new(&face.surface).map_err(|m| m.to_string())?;
+            for v in raised {
+                let Some(x) = self.vertices.get(v as usize) else { continue };
+                let p = v3(x.point);
+                if let Some(s) = surface.project(p, None, f64::INFINITY).and_then(|q| surface.point(q)) {
+                    vertex_gap = vertex_gap.max(s.dist(p));
+                }
+            }
+        }
+        let widest = self.edges.iter().map(|e| e.tolerance).chain(self.vertices.iter().map(|v| v.tolerance)).fold(0.0, f64::max);
+        let body_tolerance = self.tol.max(widest / BODY_TOLERANCE_RATIO).max(BODY_VERTEX_GAP_MARGIN * vertex_gap);
+        if body_tolerance > self.tol {
+            notes.push(format!(
+                "the file states its geometry within {} mm, but its edges and vertices need tolerances up to {widest:.3e} mm and its vertices lie up to {vertex_gap:.3e} mm off their faces: the body's tolerance is {body_tolerance:.3e} mm",
+                self.tol
+            ));
         }
 
         let mut vertices = Vec::with_capacity(vertex_order.len());
@@ -994,7 +1060,7 @@ impl<'t> Assembly<'t> {
             let order = crate::kernel::radial_order(edge.parameters(), edge.interval, &radial_faces)?;
             edge.uses = order.into_iter().map(|i| edge.uses.get(i).copied().ok_or("radial edge use reference")).collect::<Result<Vec<_>, &str>>()?;
         }
-        let mut brep = Brep { version: brep::VERSION, tolerance: self.tol, regions, shells: out_shells, faces, edges, vertices };
+        let mut brep = Brep { version: brep::VERSION, tolerance: body_tolerance, regions, shells: out_shells, faces, edges, vertices };
         if reoriented {
             // Parity fixes relative sides only. Certify every shell's absolute side,
             // including cavities: the traversal's starting face may itself be reversed.
@@ -2088,3 +2154,73 @@ pub(crate) fn transposed(grid: &[Vec<[f64; 4]>]) -> Vec<Vec<[f64; 4]>> {
 #[cfg(test)]
 #[path = "assembly_tests.rs"]
 mod tests;
+/// The knots of a spline edge curve, where its shape can change; none for a curve in closed form.
+fn curve_breaks(c: &BCurve) -> &[f64] {
+    match c {
+        BCurve::Spline { knots, .. } | BCurve::RationalSpline { knots, .. } => knots,
+        _ => &[],
+    }
+}
+
+/// The widest of `gap(t)` over `[t0, t1]`, as SMLib's check finds it: measured at
+/// [`EDGE_GAP_SAMPLES`] even intervals and at [`EDGE_GAP_SPAN_SAMPLES`] points inside each span
+/// between the `breaks` (knots of the edge's curve and pcurve, where a gap can rise and fall
+/// between two even samples: #12757's edges lay up to 1.7 times farther off than 16 samples
+/// found), then its [`EDGE_GAP_REFINED`] largest local maxima refined by golden section. A `t`
+/// where `gap` has no value is skipped.
+fn widest_gap(interval: [f64; 2], breaks: &[&[f64]], gap: impl Fn(f64) -> Option<f64>) -> f64 {
+    let [t0, t1] = interval;
+    if !(t0 < t1) {
+        return gap(t0).unwrap_or(0.0);
+    }
+    let mut cuts: Vec<f64> = (0..=EDGE_GAP_SAMPLES).map(|k| t0 + (t1 - t0) * (k as f64 / EDGE_GAP_SAMPLES as f64)).collect();
+    let inner: Vec<f64> = breaks.iter().flat_map(|b| b.iter().copied()).filter(|t| *t > t0 && *t < t1).collect();
+    if inner.len() <= EDGE_GAP_MAX_BREAKS {
+        cuts.extend(inner);
+    } else {
+        cuts.extend((1..EDGE_GAP_MAX_BREAKS).map(|k| t0 + (t1 - t0) * (k as f64 / EDGE_GAP_MAX_BREAKS as f64)));
+    }
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let mut ts = Vec::new();
+    for w in cuts.windows(2) {
+        let [a, b] = [w.first().copied().unwrap_or(t0), w.get(1).copied().unwrap_or(t1)];
+        ts.extend((0..=EDGE_GAP_SPAN_SAMPLES).map(|k| a + (b - a) * (k as f64 / (EDGE_GAP_SPAN_SAMPLES + 1) as f64)));
+    }
+    ts.push(t1);
+    let samples: Vec<(f64, f64)> = ts.iter().filter_map(|&t| gap(t).map(|g| (t, g))).collect();
+    let mut widest = samples.iter().fold(0.0f64, |m, s| m.max(s.1));
+    // Local maxima, largest first, each refined between its neighbours.
+    let g_at = |i: usize| samples.get(i).map_or(0.0, |s| s.1);
+    let t_at = |i: usize| samples.get(i).map_or(t0, |s| s.0);
+    let mut peaks: Vec<usize> = (0..samples.len())
+        .filter(|&i| {
+            let g = g_at(i);
+            g > 0.0 && (i == 0 || g_at(i - 1) <= g) && samples.get(i + 1).is_none_or(|n| n.1 <= g)
+        })
+        .collect();
+    peaks.sort_by(|a, b| g_at(*b).total_cmp(&g_at(*a)));
+    const PHI: f64 = 0.618_033_988_749_894_9;
+    for &i in peaks.iter().take(EDGE_GAP_REFINED) {
+        let mut a = if i == 0 { t_at(i) } else { t_at(i - 1) };
+        let mut b = samples.get(i + 1).map_or(t_at(i), |n| n.0);
+        let at = |t: f64| gap(t).unwrap_or(0.0);
+        let (mut c, mut d) = (b - PHI * (b - a), a + PHI * (b - a));
+        let (mut gc, mut gd) = (at(c), at(d));
+        for _ in 0..EDGE_GAP_REFINE_STEPS {
+            if gc >= gd {
+                b = d;
+                (d, gd) = (c, gc);
+                c = b - PHI * (b - a);
+                gc = at(c);
+            } else {
+                a = c;
+                (c, gc) = (d, gd);
+                d = a + PHI * (b - a);
+                gd = at(d);
+            }
+        }
+        widest = widest.max(gc).max(gd);
+    }
+    widest
+}
