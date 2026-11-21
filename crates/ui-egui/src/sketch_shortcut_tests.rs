@@ -149,7 +149,7 @@ fn project_can_keep_its_previous_direct_pick_workflow() {
 fn a_sketch_key_sketches_on_the_selected_planar_face() {
     let mut h = Harness::new();
     h.app.set_origin_shown(false);
-    h.app.ui.pick_bodies = false;
+    h.app.ui.pick_mode = solidcraft_engine::PickMode::Faces;
     h.app.run("solid.box", json!({"length":10,"width":10,"height":10,"body_name":"BaseBox"})).unwrap();
     h.call("ui.view", json!({"view":"top"}));
     h.call("ui.view", json!({"view":"fit"}));
@@ -357,7 +357,13 @@ fn a_tools_shortcut_pressed_again_cycles_its_modes() {
     h.settle();
     press(&mut h, "R");
     assert_eq!(tool(&h), Some("sketch.rectangle.two_point"), "the first press starts the bound mode");
-    for want in ["sketch.rectangle.three_point", "sketch.rectangle.center", "sketch.rectangle.rounded", "sketch.rectangle.two_point"] {
+    for want in [
+        "sketch.rectangle.three_point",
+        "sketch.rectangle.center",
+        "sketch.rectangle.edge_center",
+        "sketch.rectangle.rounded",
+        "sketch.rectangle.two_point",
+    ] {
         press(&mut h, "R");
         assert_eq!(tool(&h), Some(want));
     }
