@@ -3,17 +3,22 @@
 //! pins it to the toolbar, removes it, or pins it to the S box's favourites; buttons are dragged
 //! to reorder them within and between panels; a drop-down row dragged onto the toolbar pins it
 //! there, a button dragged off the toolbar (or back into the drop-down) leaves it; the pin icon
-//! on a hovered drop-down row pins or unpins; the toolbar's own menu (right-click its empty
-//! space) has Customize Toolbar… (a window listing every command of the tab with a check box)
-//! and Reset Toolbar; Reset Toolbar restores the tab. Kept with the
-//! preferences and exported or imported with the keyboard shortcuts.
+//! on a hovered drop-down row pins or unpins; the toolbar's own menu (the plus after the tabs,
+//! or right-click its empty space or a tab) shows or hides each tab, and has Customize Toolbar…
+//! (a window listing every command of the tab with a check box) and Reset Toolbar; Reset Toolbar
+//! restores the tab. The buttons are kept with the preferences and exported or imported with the
+//! keyboard shortcuts; hidden tabs are kept in the `hidden_toolbar_tabs` preference.
+//!
+//! The quick-access bar (#10223) is kept here too: the commands a command's menu added to the
+//! application bar, after Save, Undo and Redo, in the order the user dragged them into. It is
+//! empty, and so not drawn, until a command is added.
 
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 use solidcraft_engine::{CommandSpec, command_specs};
 
-use crate::context_menu::Item;
+use crate::ui_kit::Item;
 use crate::{SolveApp, ui_kit};
 
 /// The only workspace so far.
@@ -26,24 +31,50 @@ pub struct ToolbarCustom {
     pub panels: BTreeMap<String, Vec<String>>,
     /// `"<workspace>/<tab>"` → gallery commands moved to full-size buttons.
     pub gallery_buttons: BTreeMap<String, Vec<String>>,
+    /// The quick-access bar's commands, in order (#10223). Empty by default: no bar.
+    pub quick_access: Vec<String>,
+    /// One saved list for every movable application-bar control.
+    pub app_bar: ui_kit::app_bar_items::Layout,
+    /// Newer versions' toolbar keys survive importing and saving on this version.
+    pub extra: BTreeMap<String, Value>,
     /// The Customize Toolbar window is open (not kept).
     pub customizing: bool,
 }
 
+/// Most commands the quick-access bar holds.
+pub const MAX_QUICK_ACCESS: usize = 24;
+
 impl ToolbarCustom {
-    /// Whether a command still uses a compact gallery cell in this panel.
-    pub fn in_gallery(&self, tab: &str, panel: &str, id: &str) -> bool {
+    /// Whether a command still uses a compact gallery cell in this panel. `pinned`: constraints
+    /// the user pinned join the default six (the `pinned_constraints_in_grid` preference).
+    pub fn in_gallery(&self, tab: &str, panel: &str, id: &str, pinned: bool) -> bool {
         tab == "SKETCH"
             && panel == "CONSTRAIN"
-            && crate::workspace::CONSTRAINT_GALLERY.contains(&id)
+            && (crate::workspace::CONSTRAINT_GALLERY.contains(&id) || (pinned && crate::workspace::constraint_cell(id)))
             && !self.gallery_buttons.get(&format!("{WORKSPACE}/{tab}")).is_some_and(|ids| ids.iter().any(|c| c == id))
     }
 
     pub fn prefs(&self) -> Value {
-        json!({"version": 2, "panels": self.panels, "gallery_buttons": self.gallery_buttons})
+        let mut value = json!({"version": 4, "panels": self.panels, "gallery_buttons": self.gallery_buttons, "quick_access": self.quick_access, "app_bar": self.app_bar.to_value()});
+        if let Some(object) = value.as_object_mut() {
+            for (key, value) in &self.extra {
+                object.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        value
     }
     pub fn load(&mut self, v: &Value) {
-        let current = v.get("version").and_then(Value::as_u64) == Some(2);
+        let version = v.get("version").and_then(Value::as_u64).unwrap_or(0);
+        let current = version >= 2;
+        self.extra = v
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(key, value)| {
+                !matches!(key.as_str(), "version" | "panels" | "gallery_buttons" | "quick_access" | "app_bar") && (current || !value.is_array())
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
         let panels = if current { v.get("panels").unwrap_or(&Value::Null) } else { v };
         self.panels = panels
             .as_object()
@@ -70,10 +101,80 @@ impl ToolbarCustom {
                     .collect()
             })
             .unwrap_or_default();
+        // Saved ids are kept as they are, each once; one this version lacks is not drawn.
+        self.quick_access.clear();
+        for id in v.get("quick_access").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).take(100) {
+            if !id.is_empty() && id.len() <= 200 && !self.quick_access.iter().any(|q| q == id) && self.quick_access.len() < MAX_QUICK_ACCESS {
+                self.quick_access.push(id.to_string());
+            }
+        }
         if !current {
             self.migrate();
         }
+        if version < 3 {
+            self.migrate_render_tabs();
+        }
+        let defaults = ui_kit::app_bar_items::Layout::default_for(self.quick_access.iter().map(String::as_str));
+        self.app_bar = v.get("app_bar").map_or_else(|| defaults.clone(), |v| ui_kit::app_bar_items::Layout::from_value(v, &defaults));
     }
+
+    /// Shared apply path for imports and the future editor. Legacy hide settings are checked
+    /// independently when drawing, so applying or resetting a layout never changes them.
+    pub fn apply_app_bar(&mut self, mut layout: ui_kit::app_bar_items::Layout) {
+        layout.sanitize(&ui_kit::app_bar_items::Layout::default_for(self.quick_access.iter().map(String::as_str)));
+        self.app_bar = layout;
+    }
+
+    pub fn reset_app_bar(&mut self) {
+        self.app_bar = ui_kit::app_bar_items::Layout::default_for(self.quick_access.iter().map(String::as_str));
+    }
+    /// Split the former six-section Render ribbon without losing personal pins or removals.
+    fn migrate_render_tabs(&mut self) {
+        let mut migrated_panels: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (old_tab, old, targets) in [
+            ("RENDER", "SCENE", &[("RENDER CAMERA", "SHOTS"), ("RENDER CAMERA", "VIEW"), ("RENDER SCENE", "STUDIO")][..]),
+            ("RENDER", "APPEARANCE", &[("RENDER APPEARANCE", "APPEARANCE")][..]),
+            ("RENDER", "LIGHTING", &[("RENDER SCENE", "STUDIO")][..]),
+            ("RENDER", "ENVIRONMENT", &[("RENDER SCENE", "STAGE")][..]),
+            ("RENDER", "CAMERA", &[("RENDER CAMERA", "LENS"), ("RENDER CAMERA", "FRAME"), ("RENDER CAMERA", "VIEW")][..]),
+            ("RENDER", "IMAGE", &[("RENDER", "IMAGE"), ("RENDER", "RENDER"), ("RENDER", "RESULT")][..]),
+            ("RENDER LIGHTING", "LIGHTING", &[("RENDER SCENE", "STUDIO"), ("RENDER SCENE", "LIGHTS")][..]),
+            ("RENDER LIGHTING", "ENVIRONMENT", &[("RENDER SCENE", "STAGE"), ("RENDER SCENE", "STUDIO")][..]),
+            ("RENDER", "OUTPUT", &[("RENDER", "RENDER"), ("RENDER", "IMAGE")][..]),
+            ("RENDER", "RESULTS", &[("RENDER", "RESULT"), ("RENDER", "IMAGE")][..]),
+        ] {
+            let Some(ids) = self.panels.remove(&key(old_tab, old)) else { continue };
+            for &(tab, panel) in targets {
+                let k = key(tab, panel);
+                let migrated: Vec<_> = ids
+                    .iter()
+                    .filter(|id| solidcraft_engine::find_command(id).and_then(crate::workspace::legacy_render_destination) == Some((tab, panel)))
+                    .cloned()
+                    .collect();
+                let list = migrated_panels.entry(k).or_default();
+                for id in migrated {
+                    if !list.contains(&id) {
+                        list.push(id);
+                    }
+                }
+            }
+            // Preserve deliberately cross-pinned commands with no destination in this split.
+            if let Some(&(tab, panel)) = targets.first() {
+                let list = migrated_panels.entry(key(tab, panel)).or_default();
+                for id in ids {
+                    let destination = solidcraft_engine::find_command(&id).and_then(crate::workspace::legacy_render_destination);
+                    if !targets.iter().any(|target| Some(*target) == destination) && !list.contains(&id) {
+                        list.push(id);
+                    }
+                }
+            }
+        }
+        for (k, ids) in migrated_panels {
+            // New-layout customisation is authoritative when both versions are present.
+            self.panels.entry(k).or_insert(ids);
+        }
+    }
+
     fn migrate(&mut self) {
         use std::collections::BTreeSet;
         let specs = command_specs();
@@ -136,6 +237,25 @@ fn key(tab: &str, panel: &str) -> String {
 
 /// The buttons a panel shows: the user's list, or the first `promoted` commands of the panel.
 pub fn buttons(app: &SolveApp, tab: &str, panel: &str, cmds: &[&'static CommandSpec], promoted: usize) -> Vec<&'static CommandSpec> {
+    if tab == "DRAWING LAYOUT" && panel == "VIEWS" {
+        let flat_pattern = "drawing.view.flat_pattern";
+        let sheet_metal = crate::workspace::sheet_body(app).is_some();
+        if let Some(ids) = app.toolbar_custom.panels.get(&key(tab, panel)) {
+            return ids
+                .iter()
+                .filter(|id| id.as_str() != "drawing.view.projected.planned" && (id.as_str() != flat_pattern || sheet_metal))
+                .filter_map(|id| solidcraft_engine::find_command(id))
+                .collect();
+        }
+        let mut shown: Vec<_> = cmds.iter().take(promoted).copied().collect();
+        if sheet_metal
+            && let Some(flat) = cmds.iter().find(|command| command.id == flat_pattern)
+            && let Some(break_view) = shown.iter_mut().find(|command| command.id == "drawing.view.break")
+        {
+            *break_view = *flat;
+        }
+        return shown;
+    }
     match app.toolbar_custom.panels.get(&key(tab, panel)) {
         Some(ids) => ids.iter().filter_map(|id| solidcraft_engine::find_command(id)).collect(),
         None => cmds.iter().take(promoted).copied().collect(),
@@ -190,12 +310,18 @@ fn home_panel(tab: &str, id: &str) -> Option<&'static str> {
     lists.iter().find(|(_, cmds, _)| cmds.iter().any(|c| c.id == id)).or(lists.first()).map(|(p, ..)| *p)
 }
 
+/// FINISH EDITING, shown only while a linked design is edited in place, keeps its one button:
+/// nothing moves into it, and Finish Edit moves nowhere else.
+fn fixed(tab: &str, panel: &str, id: &str) -> bool {
+    (tab == "MODEL" && panel == "FINISH EDITING") || id == "component.finish_edit"
+}
+
 /// Pin a command to the toolbar of a tab (as a button of its panel, at the end).
 pub fn pin(app: &mut SolveApp, tab: &str, id: &str) -> Result<(), String> {
     if solidcraft_engine::find_command(id).is_none() {
         return Err(format!("no command `{id}`"));
     }
-    if pinned_on(app, tab, id).is_some() {
+    if pinned_on(app, tab, id).is_some() || fixed(tab, "", id) {
         return Ok(());
     }
     let panel = home_panel(tab, id).ok_or_else(|| format!("the {tab} tab has no panels"))?;
@@ -207,18 +333,29 @@ pub fn pin(app: &mut SolveApp, tab: &str, id: &str) -> Result<(), String> {
 
 /// Remove a command's button from a tab (it stays in its panel's drop-down).
 pub fn remove(app: &mut SolveApp, tab: &str, id: &str) {
-    let Some(panel) = pinned_on(app, tab, id) else { return };
+    let Some(panel) = pinned_on(app, tab, id).filter(|panel| !fixed(tab, panel, id)) else { return };
     let mut ids = own(app, tab, panel);
     ids.retain(|x| x != id);
     app.toolbar_custom.panels.insert(key(tab, panel), ids);
 }
 
+/// [`ToolbarCustom::in_gallery`] with the user's preference.
+pub fn in_gallery(app: &SolveApp, tab: &str, panel: &str, id: &str) -> bool {
+    app.toolbar_custom.in_gallery(tab, panel, id, app.preferences.pinned_constraints_in_grid)
+}
+
 /// Move a button before another one (`before`: None puts it at the end of `panel`).
 pub fn reorder(app: &mut SolveApp, tab: &str, id: &str, panel: &str, before: Option<&str>) {
+    if fixed(tab, panel, id) {
+        return;
+    }
     // A gallery command dropped on a gallery cell goes (back) into the gallery; dropped anywhere
     // else it becomes a full-size button.
-    if tab == "SKETCH" && crate::workspace::CONSTRAINT_GALLERY.contains(&id) {
-        let into_gallery = before.is_some_and(|b| app.toolbar_custom.in_gallery(tab, panel, b));
+    if tab == "SKETCH"
+        && (crate::workspace::CONSTRAINT_GALLERY.contains(&id)
+            || (app.preferences.pinned_constraints_in_grid && crate::workspace::constraint_cell(id)))
+    {
+        let into_gallery = before.is_some_and(|b| in_gallery(app, tab, panel, b));
         let ids = app.toolbar_custom.gallery_buttons.entry(format!("{WORKSPACE}/{tab}")).or_default();
         ids.retain(|c| c != id);
         if !into_gallery {
@@ -246,6 +383,50 @@ pub fn toggle(app: &mut SolveApp, tab: &str, id: &str) {
     }
 }
 
+/// Add a command to the end of the quick-access bar (#10223); a command already there stays put.
+pub fn quick_add(app: &mut SolveApp, id: &str) -> Result<(), String> {
+    let spec = solidcraft_engine::find_command(id).ok_or_else(|| format!("no command `{id}`"))?;
+    let list = &mut app.toolbar_custom.quick_access;
+    if list.iter().any(|q| q == spec.id) {
+        return Ok(());
+    }
+    if list.len() >= MAX_QUICK_ACCESS {
+        return Err(solidcraft_ui_text::format("ui.quick_access_full", &[("count", &MAX_QUICK_ACCESS.to_string())]));
+    }
+    list.push(spec.id.to_string());
+    let layout = app.toolbar_custom.app_bar.clone();
+    app.toolbar_custom.apply_app_bar(layout);
+    Ok(())
+}
+
+/// Take a command off the quick-access bar.
+pub fn quick_remove(app: &mut SolveApp, id: &str) {
+    app.toolbar_custom.quick_access.retain(|q| q != id);
+    app.toolbar_custom.app_bar.items.retain(|p| p.id != format!("quick:{id}"));
+}
+
+/// Move a quick-access button before another one (`before`: None puts it at the end).
+pub fn quick_move(app: &mut SolveApp, id: &str, before: Option<&str>) {
+    let list = &mut app.toolbar_custom.quick_access;
+    if !list.iter().any(|q| q == id) || before == Some(id) {
+        return;
+    }
+    list.retain(|q| q != id);
+    let at = before.and_then(|b| list.iter().position(|q| q == b)).unwrap_or(list.len());
+    list.insert(at, id.to_string());
+    let key = format!("quick:{id}");
+    if let Some(at) = app.toolbar_custom.app_bar.items.iter().position(|p| p.id == key) {
+        let item = app.toolbar_custom.app_bar.items.remove(at);
+        let before_key = before.map(|id| format!("quick:{id}"));
+        let target = before_key
+            .as_ref()
+            .and_then(|id| app.toolbar_custom.app_bar.items.iter().position(|p| &p.id == id && p.zone == item.zone))
+            .or_else(|| app.toolbar_custom.app_bar.items.iter().rposition(|p| p.id.starts_with("quick:") && p.zone == item.zone).map(|i| i + 1))
+            .unwrap_or(at.min(app.toolbar_custom.app_bar.items.len()));
+        app.toolbar_custom.app_bar.items.insert(target, item);
+    }
+}
+
 /// Reset Toolbar: a tab's panels back to their defaults.
 pub fn reset(app: &mut SolveApp, tab: &str) {
     let prefix = format!("{WORKSPACE}/{tab}/");
@@ -265,18 +446,45 @@ pub fn command_items(app: &SolveApp, id: &str) -> Vec<Item> {
         Item::action("ui.toolbarPin", "Pin to Toolbar", "plus").with(json!({ "command": id }))
     });
     v.push(Item::action("ui.shortcutPin", if fav { "Unpin from Shortcuts" } else { "Pin to Shortcuts" }, "star").with(json!({ "command": id })));
+    // The application bar's quick-access buttons (#10223).
+    v.push(if app.toolbar_custom.quick_access.iter().any(|q| q == id) {
+        Item::action("ui.quickAccessRemove", "Remove from Quick Access", "close").with(json!({ "command": id }))
+    } else {
+        Item::action("ui.quickAccessAdd", "Add to Quick Access", "plus").with(json!({ "command": id }))
+    });
     v.push(Item::sep());
     v.push(Item::action("ui.toolbarCustomize", "Customize Toolbar…", "settings"));
     v.push(Item::action("ui.toolbarReset", "Reset Toolbar", "restore").with(json!({ "tab": tab })));
     v
 }
 
-/// The toolbar's own menu (right-click on its empty space).
+/// The toolbar's own menu (right-click on its empty space or a tab): every tab that can be shown
+/// or hidden, ticked when on, then the button customisation of the selected tab.
 pub fn toolbar_items(app: &SolveApp) -> Vec<Item> {
-    vec![
-        Item::action("ui.toolbarCustomize", "Customize Toolbar…", "settings"),
-        Item::action("ui.toolbarReset", "Reset Toolbar", "restore").with(json!({ "tab": app.ui.tab })),
-    ]
+    let mut v = Vec::new();
+    if !crate::render_workspace::active(app) {
+        v.push(Item::heading(app.tr("prefs.toolbar_tabs")));
+        for tab in crate::workspace::choosable_tabs() {
+            let on = crate::workspace::tab_turned_on(app, tab);
+            // The row reads as the tab does, in every language.
+            let item = Item::action("ui.toolbarTab", &crate::toolbar::ribbon_label(app, tab), crate::workspace::tab_icon(tab))
+                .with(json!({ "tab": tab, "shown": !on }));
+            v.push(if on { item.key("current") } else { item });
+        }
+        // With every tab hidden there is no tab to customise.
+        v.push(Item::sep());
+        // Fold the ribbon to its tab row, or show it whole again (#10112).
+        let on = app.preferences.ribbon_tabs_only;
+        let item = crate::context_menu::cmd(app, "view.ribbon_tabs_only", "Ribbon Tabs Only").with(json!({ "on": !on }));
+        v.push(if on { item.key("current") } else { item });
+        if !crate::workspace::visible_tabs(app).contains(&app.ui.tab.as_str()) {
+            return v;
+        }
+        v.push(Item::sep());
+    }
+    v.push(Item::action("ui.toolbarCustomize", "Customize Toolbar…", "settings"));
+    v.push(Item::action("ui.toolbarReset", "Reset Toolbar", "restore").with(json!({ "tab": app.ui.tab })));
+    v
 }
 
 /// Run a toolbar item from a menu.
@@ -292,20 +500,40 @@ pub fn run(app: &mut SolveApp, action: &str, p: &Value) {
         "ui.toolbarRemove" => remove(app, &tab, id),
         "ui.toolbarReset" => reset(app, &tab),
         "ui.toolbarCustomize" => app.toolbar_custom.customizing = true,
+        "ui.toolbarTab" => crate::workspace::set_tab_shown(app, &tab, p.get("shown").and_then(Value::as_bool).unwrap_or(true)),
         "ui.shortcutPin" => app.sbox.toggle_pin(id),
+        "ui.quickAccessAdd" => {
+            if let Err(e) = quick_add(app, id) {
+                app.set_status(e, true);
+            }
+        }
+        "ui.quickAccessRemove" => quick_remove(app, id),
+        "ui.appBarReset" => app.toolbar_custom.reset_app_bar(),
         _ => {}
     }
 }
 
-/// Shortcut keys, S box favourites and the toolbar as one file (Keyboard Shortcuts › Export).
+/// Shortcut keys, S box favourites, toolbar and navigation bar as one file (Keyboard Shortcuts › Export).
 pub fn export(app: &SolveApp) -> Value {
-    json!({ "format": "solidcraft-shortcuts/1", "shortcuts": app.keymap.prefs(), "favourites": app.sbox.pinned, "toolbar": app.toolbar_custom.prefs() })
+    json!({ "format": "solidcraft-shortcuts/1", "shortcuts": app.keymap.prefs(), "favourites": app.sbox.pinned, "toolbar": app.toolbar_custom.prefs(), "navigation_bar": app.preferences.navigation_bar })
 }
 
+/// The largest shortcuts file Import… reads (hostile input; an export is a few tens of KiB).
+pub const MAX_IMPORT_BYTES: usize = 1 << 20;
+
 pub fn import(app: &mut SolveApp, v: &Value) -> Result<(), String> {
-    // "solvecraft-shortcuts/1": files exported before the rename (compatibility shim).
-    if !matches!(v.get("format").and_then(Value::as_str), Some("solidcraft-shortcuts/1" | "solvecraft-shortcuts/1")) {
+    if v.get("format").and_then(Value::as_str) != Some("solidcraft-shortcuts/1") {
         return Err("not a SolidCraft shortcuts file".into());
+    }
+    let navigation_bar = v
+        .get("navigation_bar")
+        .map(|value| {
+            crate::navigation_bar::validate(value)?;
+            serde_json::from_value::<crate::navigation_bar::NavigationBar>(value.clone()).map_err(|e| e.to_string())
+        })
+        .transpose()?;
+    if let Some(bar) = navigation_bar {
+        app.preferences.navigation_bar = bar;
     }
     if let Some(s) = v.get("shortcuts") {
         app.keymap.load(s);
@@ -319,8 +547,13 @@ pub fn import(app: &mut SolveApp, v: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// A command's icon in the Customize Toolbar list: the one its ribbon button shows right now.
+fn row_icon(app: &SolveApp, command: &CommandSpec) -> &'static str {
+    crate::render_workspace::interactive_command_info(app, command).icon
+}
+
 /// Customize Toolbar: every command of the tab's panels with a check box (on the toolbar or
-/// not), how to drag them, and Reset Toolbar.
+/// not) and its ribbon icon, how to drag them, and Reset Toolbar.
 pub fn window(app: &mut SolveApp, ctx: &egui::Context) {
     if !app.toolbar_custom.customizing {
         return;
@@ -328,44 +561,49 @@ pub fn window(app: &mut SolveApp, ctx: &egui::Context) {
     let tab = app.ui.tab.clone();
     let mut changes: Vec<(&'static str, bool)> = Vec::new();
     let mut reset_tab = false;
-    let t = crate::theme::Tokens::get();
+    let t = solidcraft_theme::Tokens::get();
     // This long card grows as sections open. A top-left pivot keeps its controls at their
     // published positions instead of shifting them after egui measures the taller content.
     let origin =
         egui::pos2((ctx.content_rect().center().x - t.form_card_width).max(ctx.content_rect().left()), ctx.content_rect().top() + t.space_24 * 2.0);
-    let (closed, action) = ui_kit::Window::new(egui::Id::new("sc_toolbar_customize"), "settings", crate::i18n::tr_label("Customize Toolbar"))
-        .placed(egui::Align2::LEFT_TOP, origin)
-        .cards(2.0)
-        .actions("", "Close", None)
-        .show(ctx, true, |ui| {
-            ui_kit::text(ui, &crate::i18n::format("toolbar.customize_note", &[("tab", app.tr_label(&tab))]), ui_kit::Text::Note("customize"));
-            egui::ScrollArea::vertical()
-                .max_height(
-                    (ctx.content_rect().height() - crate::theme::Tokens::get().control_height * 8.0)
-                        .min(crate::theme::Tokens::get().control_height * 20.0),
-                )
-                .show(ui, |ui| {
-                    for (panel, cmds, n) in panel_lists(&tab) {
-                        if cmds.is_empty() {
-                            continue;
-                        }
-                        ui_kit::section(ui, panel, app.tr_label(panel), true, |ui| {
-                            let shown = buttons(app, &tab, panel, &cmds, n);
-                            for c in &cmds {
-                                let mut on = shown.iter().any(|b| b.id == c.id) || pinned_on(app, &tab, c.id).is_some();
-                                let r = ui_kit::checkbox(ui, app.tr_label(c.label), &mut on);
-                                crate::scenario::publish_handle(&format!("customize:{}", c.id), r.rect.center());
-                                if r.changed() {
-                                    changes.push((c.id, on));
-                                }
+    let (closed, action) =
+        ui_kit::Window::new(egui::Id::unique("sc_toolbar_customize"), "settings", solidcraft_ui_text::tr_label("Customize Toolbar"))
+            .placed(egui::Align2::LEFT_TOP, origin)
+            .cards(2.0)
+            .actions("", "ui.close", None)
+            .show(ctx, true, |ui| {
+                ui_kit::text(
+                    ui,
+                    &solidcraft_ui_text::format("toolbar.customize_note", &[("tab", app.tr_label(&tab))]),
+                    ui_kit::Text::Note("customize"),
+                );
+                egui::ScrollArea::vertical()
+                    .max_height(
+                        (ctx.content_rect().height() - solidcraft_theme::Tokens::get().control_height * 8.0)
+                            .min(solidcraft_theme::Tokens::get().control_height * 20.0),
+                    )
+                    .show(ui, |ui| {
+                        for (panel, cmds, n) in panel_lists(&tab) {
+                            if cmds.is_empty() {
+                                continue;
                             }
-                        });
-                    }
-                });
-            let reset = ui_kit::button(ui, crate::i18n::tr_label("Reset Toolbar"), ui_kit::Button::Normal);
-            crate::scenario::publish_target("customize:reset", reset.rect);
-            reset_tab |= reset.clicked();
-        });
+                            ui_kit::section(ui, panel, app.tr_label(panel), true, |ui| {
+                                let shown = buttons(app, &tab, panel, &cmds, n);
+                                for c in &cmds {
+                                    let mut on = shown.iter().any(|b| b.id == c.id) || pinned_on(app, &tab, c.id).is_some();
+                                    let r = ui_kit::checkbox_icon(ui, app.tr_label(c.label), row_icon(app, c), &mut on);
+                                    crate::scenario::publish_handle(&format!("customize:{}", c.id), r.rect.center());
+                                    if r.changed() {
+                                        changes.push((c.id, on));
+                                    }
+                                }
+                            });
+                        }
+                    });
+                let reset = ui_kit::button(ui, solidcraft_ui_text::tr_label("Reset Toolbar"), ui_kit::Button::Normal);
+                crate::scenario::publish_target("customize:reset", reset.rect);
+                reset_tab |= reset.clicked();
+            });
     for (id, on) in changes {
         if on {
             if let Err(e) = pin(app, &tab, id) {
@@ -382,8 +620,83 @@ pub fn window(app: &mut SolveApp, ctx: &egui::Context) {
 }
 
 #[cfg(test)]
+mod row_icon_tests {
+    use super::*;
+    use crate::scenario::Harness;
+
+    /// A row shows the icon its ribbon button shows, also while the command's state changes it:
+    /// Play History shows Stop while History plays.
+    #[test]
+    fn a_row_follows_the_ribbon_icon_of_play_history() {
+        let mut h = Harness::new();
+        h.app.home.open = false;
+        for corner in [[0, 0, 0], [30, 0, 0]] {
+            h.app.run("solid.box", json!({"corner": corner, "length": 10, "width": 10, "height": 10})).unwrap();
+        }
+        h.app.run("timeline.roll_to", json!({"position": 0})).unwrap();
+        let command = solidcraft_engine::find_command("timeline.play").unwrap();
+        assert_eq!(row_icon(&h.app, command), "timeline_play");
+        h.app.start(command.id);
+        assert!(h.app.timeline_playback.is_some(), "History plays");
+        assert_eq!(row_icon(&h.app, command), "timeline_stop");
+        assert_eq!(row_icon(&h.app, command), crate::render_workspace::interactive_command_info(&h.app, command).icon);
+    }
+}
+
+#[cfg(test)]
 mod migration_tests {
     use super::*;
+
+    #[test]
+    fn app_bar_migrates_old_quick_access_and_preserves_future_toolbar_keys() {
+        let mut legacy = ToolbarCustom::default();
+        legacy.load(&json!({"DESIGN/future/panel":["future.command"],"future_setting":{"keep":true}}));
+        assert_eq!(legacy.prefs()["future_setting"], json!({"keep":true}));
+        for quick in [json!([]), json!(["solid.box", "future.command", "solid.box"])] {
+            let mut custom = ToolbarCustom::default();
+            custom.load(&json!({"version":3,"quick_access":quick,"future_setting":{"keep":true},"panels":{"OTHER/future/panel":["future.command"]}}));
+            assert_eq!(custom.app_bar, ui_kit::app_bar_items::Layout::default_for(custom.quick_access.iter().map(String::as_str)));
+            let value = custom.prefs();
+            assert_eq!(value["version"], 4);
+            assert_eq!(value["future_setting"], json!({"keep":true}));
+            let mut loaded = ToolbarCustom::default();
+            loaded.load(&value);
+            assert_eq!(custom, loaded);
+        }
+    }
+
+    #[test]
+    fn app_bar_apply_export_import_and_reset_share_the_saved_list() {
+        let mut h = crate::scenario::Harness::new();
+        quick_add(&mut h.app, "solid.box").unwrap();
+        let mut layout = h.app.toolbar_custom.app_bar.clone();
+        layout.items.reverse();
+        layout.items[0].shown = false;
+        layout.items.push(ui_kit::app_bar_items::Placement { id: "future:item".into(), zone: ui_kit::app_bar_items::Zone::End, shown: false });
+        h.app.toolbar_custom.apply_app_bar(layout.clone());
+        let exported = export(&h.app);
+        h.app.toolbar_custom.reset_app_bar();
+        import(&mut h.app, &exported).unwrap();
+        assert_eq!(h.app.toolbar_custom.app_bar, layout);
+        run(&mut h.app, "ui.appBarReset", &json!({}));
+        assert_eq!(h.app.toolbar_custom.app_bar, ui_kit::app_bar_items::Layout::default_for(["solid.box"]));
+        assert_eq!(h.app.toolbar_custom.quick_access, ["solid.box"]);
+        assert!(h.app.dialog.is_none());
+    }
+
+    #[test]
+    fn quick_access_add_remove_and_reorder_keep_placements_in_step() {
+        let mut h = crate::scenario::Harness::new();
+        quick_add(&mut h.app, "solid.box").unwrap();
+        quick_add(&mut h.app, "solid.fillet").unwrap();
+        quick_add(&mut h.app, "solid.box").unwrap();
+        quick_move(&mut h.app, "solid.fillet", Some("solid.box"));
+        let quick: Vec<_> = h.app.toolbar_custom.app_bar.items.iter().filter_map(|p| p.id.strip_prefix("quick:")).collect();
+        assert_eq!(quick, ["solid.fillet", "solid.box"]);
+        quick_remove(&mut h.app, "solid.fillet");
+        assert!(!h.app.toolbar_custom.app_bar.items.iter().any(|p| p.id == "quick:solid.fillet"));
+        assert_eq!(h.app.toolbar_custom.quick_access, ["solid.box"]);
+    }
 
     /// Each tab's panel lists are worked out once and come back the same as worked out anew,
     /// for every tab the ribbon has (and an unknown one).

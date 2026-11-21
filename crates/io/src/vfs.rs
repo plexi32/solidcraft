@@ -46,11 +46,25 @@ mod imp {
         touched();
         std::fs::metadata(path).map(|m| m.len())
     }
+    /// The file's modification time and size (`None`: not there, or the platform keeps no times).
+    pub fn stamp(path: &str) -> Option<(std::time::SystemTime, u64)> {
+        check(path).ok()?;
+        touched();
+        let meta = std::fs::metadata(path).ok()?;
+        Some((meta.modified().ok()?, meta.len()))
+    }
     pub fn exists(path: &str) -> bool {
         check(path).is_ok() && {
             touched();
             std::path::Path::new(path).exists()
         }
+    }
+    /// The path with links and `.`/`..` resolved, for telling whether two paths name one file.
+    /// It opens the path: on Windows a network path connects to its host, so a path a design
+    /// names goes through [`design_path_refusal`] first. No agent scope applies (it reads nothing).
+    pub fn canonicalize(path: &str) -> Result<std::path::PathBuf> {
+        touched();
+        std::fs::canonicalize(path)
     }
     /// Whether the path names a regular file the caller may access.
     pub fn is_file(path: &str) -> bool {
@@ -69,6 +83,30 @@ mod imp {
         check(path)?;
         touched();
         std::fs::create_dir_all(path)
+    }
+    /// A new folder and any missing folders above it, authorized as a new destination
+    /// ([`check_new`]): its parents need not exist yet, but those that do must be in scope.
+    pub fn create_new_dir_all(path: &str) -> Result<()> {
+        check_new(path)?;
+        touched();
+        std::fs::create_dir_all(path)
+    }
+    /// The paths of the regular files directly in a folder, sorted; at most `max` of them.
+    pub fn files_in(dir: &str, max: usize) -> Result<Vec<String>> {
+        check(dir)?;
+        touched();
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                out.push(entry.path().to_string_lossy().into_owned());
+                if out.len() > max {
+                    return Err(Error::new(ErrorKind::InvalidData, "too many files in the folder"));
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 }
 
@@ -108,6 +146,10 @@ mod imp {
     pub fn len(path: &str) -> Result<u64> {
         FILES.with(|f| f.borrow().get(path).map(|b| b.len() as u64)).ok_or_else(|| missing(path))
     }
+    /// Browser storage keeps no modification times.
+    pub fn stamp(_path: &str) -> Option<(std::time::SystemTime, u64)> {
+        None
+    }
     pub fn exists(path: &str) -> bool {
         FILES.with(|f| f.borrow().contains_key(path))
     }
@@ -122,12 +164,26 @@ mod imp {
     pub fn create_dir_all(_path: &str) -> Result<()> {
         Ok(())
     }
+    /// As [`create_dir_all`]: nothing to make.
+    pub fn create_new_dir_all(_path: &str) -> Result<()> {
+        Ok(())
+    }
     pub fn insert(path: &str, bytes: Vec<u8>) {
         FILES.with(|f| f.borrow_mut().insert(path.to_string(), bytes));
     }
     pub fn take_writes() -> Vec<(String, Vec<u8>)> {
         let paths = WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
         paths.into_iter().filter_map(|p| FILES.with(|f| f.borrow().get(&p).cloned()).map(|b| (p, b))).collect()
+    }
+    /// The files directly in a folder, sorted; at most `max` of them.
+    pub fn files_in(dir: &str, max: usize) -> Result<Vec<String>> {
+        let prefix = format!("{}/", dir.trim_end_matches('/'));
+        let out: Vec<String> =
+            FILES.with(|f| f.borrow().keys().filter(|p| p.strip_prefix(&prefix).is_some_and(|rest| !rest.contains('/'))).cloned().collect());
+        if out.len() > max {
+            return Err(Error::new(ErrorKind::InvalidData, "too many files in the folder"));
+        }
+        Ok(out)
     }
     pub fn list(prefix: &str) -> Vec<(String, u64)> {
         FILES.with(|f| f.borrow().iter().filter(|(p, _)| p.starts_with(prefix)).map(|(p, b)| (p.clone(), b.len() as u64)).collect())
@@ -141,14 +197,34 @@ pub use imp::*;
 /// refuses paths outside it; without one (the user's own file dialogs, the CLI) nothing changes.
 ///
 /// Two kinds of folder: those named on purpose (`--allow-path`, the app's own recovery folder),
-/// where everything is reachable, and the open design's folder, which counts only when
-/// [`design_folder_refusal`] has nothing against it and never reaches hidden files or folders
-/// (`.env`, `.git`) inside it.
+/// where everything is reachable, and design folders (the open design's, and those an agent
+/// opened or saved a design in, #7181), which count only when [`design_folder_refusal`] has
+/// nothing against them and never reach hidden files or folders (`.env`, `.git`) inside them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PathScope {
     roots: Vec<std::path::PathBuf>,
     design_roots: Vec<std::path::PathBuf>,
+    /// Folders named on purpose that could not be resolved (#16662), kept to explain a refusal.
+    rejected: Vec<RejectedRoot>,
 }
+
+/// A folder named for a [`PathScope`] that could not be used, and why (#16662).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RejectedRoot {
+    /// The folder as it was given.
+    pub path: std::path::PathBuf,
+    /// Why it was left out, in words for the user ("it doesn't exist").
+    pub reason: String,
+}
+
+impl std::fmt::Display for RejectedRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ignored: {}", self.path.display(), self.reason)
+    }
+}
+
+/// At most this many design folders in a scope; the oldest gives way.
+pub const MAX_DESIGN_FOLDERS: usize = 16;
 
 thread_local! {
     static SCOPE: std::cell::RefCell<Option<PathScope>> = const { std::cell::RefCell::new(None) };
@@ -177,7 +253,7 @@ fn hidden(name: &std::ffi::OsStr) -> bool {
 /// in a hidden folder. So a design saved in home itself, in `/`, on a drive root or in a system
 /// folder never puts `~/.ssh`, `~/.bashrc` or anything else of the user's in reach.
 pub fn design_folder_refusal(dir: &std::path::Path) -> Option<String> {
-    design_folder_refusal_in(dir, home_dir().as_deref(), Some(&std::env::temp_dir()))
+    design_folder_refusal_in(dir, home_dir().as_deref(), Some(&temp_dir()))
 }
 
 /// [`design_folder_refusal`] with the home and temporary folders given (tests).
@@ -203,28 +279,111 @@ pub fn design_folder_refusal_in(dir: &std::path::Path, home: Option<&std::path::
 }
 
 impl PathScope {
-    /// Confine file access to `roots` (resolved now; folders that don't exist are left out, so an
-    /// empty scope refuses every path).
+    /// Actual owned path buffer capacities only. The enclosing owner accounts
+    /// its PathScope/Vec headers once with size_of, without revealing paths.
+    pub fn retained_heap_bytes(&self) -> Result<u64> {
+        let fail = || Error::new(ErrorKind::InvalidData, "path scope byte overflow");
+        let slots = self.roots.capacity().checked_add(self.design_roots.capacity()).ok_or_else(fail)?;
+        let mut bytes = slots.checked_mul(std::mem::size_of::<std::path::PathBuf>()).ok_or_else(fail)?;
+        for path in self.roots.iter().chain(&self.design_roots) {
+            bytes = bytes.checked_add(path.capacity()).ok_or_else(fail)?;
+        }
+        let rejected = self.rejected.capacity().checked_mul(std::mem::size_of::<RejectedRoot>()).ok_or_else(fail)?;
+        bytes = bytes.checked_add(rejected).ok_or_else(fail)?;
+        for r in &self.rejected {
+            bytes = bytes.checked_add(r.path.capacity()).and_then(|b| b.checked_add(r.reason.capacity())).ok_or_else(fail)?;
+        }
+        u64::try_from(bytes).map_err(|_| fail())
+    }
+
+    /// Confine file access to `roots` (resolved now). A folder that can't be resolved is left out
+    /// but remembered ([`PathScope::rejected`]), so a refusal under it names it. Callers that
+    /// take folders from a person or an agent's configuration use [`PathScope::new_reporting`] and
+    /// tell them; this form is for folders the program itself chose, where an empty scope
+    /// refusing everything is the right answer.
     pub fn new(roots: impl IntoIterator<Item = std::path::PathBuf>) -> PathScope {
+        PathScope::new_reporting(roots).0
+    }
+
+    /// [`PathScope::new`], also returning each folder that was left out with the reason. A folder
+    /// that doesn't exist yet is left out too, even if it is meant to be created: a scope is
+    /// resolved once, and trusting the name of a folder that isn't there would let whatever later
+    /// appears under it (a link included) be reached. Create the folder, then name it.
+    pub fn new_reporting(roots: impl IntoIterator<Item = std::path::PathBuf>) -> (PathScope, Vec<RejectedRoot>) {
         let mut out = PathScope::default();
-        for r in roots.into_iter().filter_map(|r| canonical(&r)) {
-            if !out.roots.contains(&r) {
-                out.roots.push(r);
+        for r in roots {
+            match std::fs::canonicalize(&r) {
+                Ok(c) => {
+                    if !out.roots.contains(&c) {
+                        out.roots.push(c);
+                    }
+                }
+                Err(e) => {
+                    let reason = if e.kind() == ErrorKind::NotFound { "it doesn't exist".to_string() } else { format!("it can't be resolved ({e})") };
+                    let rej = RejectedRoot { path: r, reason };
+                    if !out.rejected.contains(&rej) {
+                        out.rejected.push(rej);
+                    }
+                }
             }
         }
-        out
+        let rejected = out.rejected.clone();
+        (out, rejected)
+    }
+
+    /// Like [`PathScope::new_reporting`], failing when `roots` is not empty and none of it could
+    /// be used (the scope would refuse everything).
+    pub fn new_strict(roots: impl IntoIterator<Item = std::path::PathBuf>) -> std::result::Result<(PathScope, Vec<RejectedRoot>), Vec<RejectedRoot>> {
+        let roots: Vec<std::path::PathBuf> = roots.into_iter().collect();
+        let given = roots.len();
+        let (scope, rejected) = PathScope::new_reporting(roots);
+        if given > 0 && scope.roots.is_empty() { Err(rejected) } else { Ok((scope, rejected)) }
+    }
+
+    /// The folders named for this scope that were left out, with the reason.
+    pub fn rejected(&self) -> &[RejectedRoot] {
+        &self.rejected
     }
 
     /// Also the folder of the design at `path` (the open design), when
-    /// [`design_folder_refusal`] allows it; hidden entries inside it stay out of reach.
-    pub fn with_design(mut self, path: Option<&str>) -> PathScope {
-        let dir = path
-            .map(std::path::Path::new)
-            .and_then(std::path::Path::parent)
-            .map(|d| if d.as_os_str().is_empty() { std::path::Path::new(".") } else { d });
-        if let Some(d) = dir.filter(|d| design_folder_refusal(d).is_none()).and_then(canonical)
+    /// [`design_folder_refusal`] allows it; hidden entries inside it stay out of reach. It is the
+    /// folder of the file as [`PathScope::check`] resolves it: a link to a design elsewhere puts
+    /// the folder it leads to in reach, never the folder the link lies in.
+    pub fn with_design(self, path: Option<&str>) -> PathScope {
+        let file = path.and_then(|p| resolve(std::path::Path::new(p)).ok());
+        match file.as_deref().and_then(std::path::Path::parent) {
+            Some(d) => self.with_design_root(d),
+            None => self,
+        }
+    }
+
+    /// Also the folder of `path`, a design file an agent opened or saved (#7181), on the same
+    /// terms as the open design's. On Windows its text is judged first, as [`PathScope::check`]
+    /// judges a path: resolving a UNC path would already make Windows connect out.
+    pub fn with_design_file(self, path: &str) -> PathScope {
+        if cfg!(windows) && windows_refusal(path).is_some() {
+            return self;
+        }
+        self.with_design(Some(path))
+    }
+
+    /// Also `dir`, a folder an agent opened or saved a design in (a request's `design_folders`),
+    /// on the same terms as the open design's folder, its text judged first on Windows.
+    pub fn with_design_folder(self, dir: &std::path::Path) -> PathScope {
+        if cfg!(windows) && windows_refusal(&dir.to_string_lossy()).is_some() {
+            return self;
+        }
+        self.with_design_root(dir)
+    }
+
+    fn with_design_root(mut self, dir: &std::path::Path) -> PathScope {
+        if design_folder_refusal(dir).is_none()
+            && let Some(d) = canonical(dir)
             && !self.design_roots.contains(&d)
         {
+            if self.design_roots.len() >= MAX_DESIGN_FOLDERS {
+                self.design_roots.remove(0);
+            }
             self.design_roots.push(d);
         }
         self
@@ -235,15 +394,43 @@ impl PathScope {
         &self.roots
     }
 
-    /// The open design's folder, when it counts.
+    /// The design folders that count.
     pub fn design_roots(&self) -> &[std::path::PathBuf] {
         &self.design_roots
     }
 
     /// Whether `path` lies inside one of the folders, after following symlinks and `..`.
     pub fn check(&self, path: &str) -> Result<()> {
+        self.check_path(path, false)
+    }
+
+    /// Check a destination whose parent directories may not exist yet, without creating them.
+    /// Existing ancestors still resolve through symlinks; missing components must be normal names.
+    pub fn check_new(&self, path: &str) -> Result<()> {
+        self.check_path(path, true)
+    }
+
+    fn check_path(&self, path: &str, new: bool) -> Result<()> {
         let refused = || {
             let roots: Vec<String> = self.roots.iter().chain(&self.design_roots).map(|r| r.display().to_string()).collect();
+            // A rejected folder is named by its supplied spelling and by its absolute one, so
+            // `exports` given relative also matches a request for `/work/exports/x.sc`.
+            let request = std::path::absolute(path).ok();
+            let names_root = |r: &RejectedRoot| {
+                std::path::Path::new(path).starts_with(&r.path)
+                    || matches!((&request, std::path::absolute(&r.path).ok()), (Some(q), Some(a)) if q.starts_with(&a))
+            };
+            if let Some(r) = self.rejected.iter().find(|r| names_root(r)) {
+                return Error::new(
+                    ErrorKind::PermissionDenied,
+                    format!(
+                        "{path}: outside the folders this agent may use ({}); the folder {} was named with `--allow-path` but {}, so it was left out",
+                        if roots.is_empty() { "none".into() } else { roots.join(", ") },
+                        r.path.display(),
+                        r.reason
+                    ),
+                );
+            }
             Error::new(
                 ErrorKind::PermissionDenied,
                 format!(
@@ -260,8 +447,11 @@ impl PathScope {
         {
             return Err(windows(why));
         }
+        if new && cfg!(windows) && path.split(['/', '\\']).any(|part| !matches!(part, "." | "..") && part.ends_with(['.', ' '])) {
+            return Err(windows("trailing dots or spaces in a future path"));
+        }
         touched();
-        let resolved = match resolve(std::path::Path::new(path)) {
+        let resolved = match if new { resolve_new(std::path::Path::new(path)) } else { resolve(std::path::Path::new(path)) } {
             Ok(r) => r,
             Err(e) if e.kind() == ErrorKind::NotFound => return Err(self.missing_folder(path).unwrap_or_else(refused)),
             Err(_) => return Err(refused()),
@@ -505,14 +695,14 @@ fn design_path_error(path: &str, why: &Remote) -> Error {
     let text = match why {
         Remote::Network(host) => format!(
             "{path}: on the network location \\\\{host}, which designs may not reach until you allow that server \
-             (Update Links or Open Linked Design asks; or Preferences › Design › Network locations)"
+             (Update Links, Open Linked Design or Reload from file asks; or Preferences › Design › Network locations)"
         ),
         Remote::Device => format!("{path}: names a device, not a file"),
     };
     Error::new(ErrorKind::PermissionDenied, text)
 }
 
-/// Check a path a design names (a linked design, a font file) before anything reads it, judged
+/// Check a path a design names (a linked design, a font file, a point cloud's file) before anything reads it, judged
 /// from its text first: a network path whose host isn't allowed, or a device path, is refused
 /// without a filesystem call. An agent's scope ([`check`]) applies on top.
 pub fn check_design_path(path: &str, design: Option<&str>) -> Result<()> {
@@ -532,6 +722,12 @@ pub fn read_design_path(path: &str, design: Option<&str>, max: usize) -> Result<
 /// it, which asks nothing of the disk or the network.
 pub fn design_path_is_file(path: &str, design: Option<&str>) -> Option<bool> {
     design_path_refusal(path, design).is_none().then(|| is_file(path))
+}
+
+/// [`stamp`] of a path a design names; `None` when [`check_design_path`] refuses it, which asks
+/// nothing of the disk or the network.
+pub fn design_path_stamp(path: &str, design: Option<&str>) -> Option<(std::time::SystemTime, u64)> {
+    design_path_refusal(path, design).is_none().then(|| stamp(path)).flatten()
 }
 
 /// The checks the layers below ask before reading a file a design names (sketch text's font
@@ -585,9 +781,17 @@ pub fn long_names(path: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+/// The temporary folder in the browser. std has none there (`std::env::temp_dir` panics on
+/// wasm32-unknown-unknown), so it is a folder of the in-memory files: what is written in it stays
+/// in memory, neither stored nor downloaded (#7192).
+pub const BROWSER_TEMP: &str = "/tmp";
+
 /// The temporary folder spelled with long names ([`long_names`]), for the folders SolidCraft
-/// makes in it.
+/// makes in it; [`BROWSER_TEMP`] in the browser.
 pub fn temp_dir() -> std::path::PathBuf {
+    if cfg!(target_arch = "wasm32") {
+        return std::path::PathBuf::from(BROWSER_TEMP);
+    }
     long_names(&std::env::temp_dir())
 }
 
@@ -603,6 +807,25 @@ fn resolve(path: &std::path::Path) -> Result<std::path::PathBuf> {
             Ok(std::fs::canonicalize(parent)?.join(name))
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Resolve a future destination without following a dangling symlink or normalizing missing `..`.
+fn resolve_new(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let mut at = path;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(at) {
+            Ok(root) => return Ok(missing.iter().rev().fold(root, |root, name| root.join(name))),
+            Err(error) if error.kind() == ErrorKind::NotFound && std::fs::symlink_metadata(at).is_err() => {
+                let (Some(parent), Some(std::path::Component::Normal(name))) = (at.parent(), at.components().next_back()) else {
+                    return Err(error);
+                };
+                missing.push(name);
+                at = if parent.as_os_str().is_empty() { std::path::Path::new(".") } else { parent };
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -636,6 +859,14 @@ pub fn check(path: &str) -> Result<()> {
         return Ok(());
     }
     SCOPE.with(|s| s.borrow().as_ref().map_or(Ok(()), |scope| scope.check(path)))
+}
+
+/// Authorize a destination before creating its missing parents. This grants no additional roots.
+pub fn check_new(path: &str) -> Result<()> {
+    if cfg!(target_arch = "wasm32") {
+        return Ok(());
+    }
+    SCOPE.with(|s| s.borrow().as_ref().map_or(Ok(()), |scope| scope.check_new(path)))
 }
 
 /// A file's text, at most `max` bytes.
@@ -736,6 +967,24 @@ mod tests {
         assert!(super::current_scope().is_none());
         assert_eq!(super::read(&s(out.join("secret.txt")), 16).unwrap(), b"secret");
         assert!(PathScope::new([base.join("nonexistent")]).check(&s(root.join("sub/a.txt"))).is_err());
+        // #16662: a folder that doesn't exist is reported, not dropped silently; the valid ones stay.
+        let missing = base.join("nonexistent");
+        let (scope, rejected) = PathScope::new_reporting([missing.clone(), root.clone()]);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!((&rejected[0].path, rejected[0].reason.as_str()), (&missing, "it doesn't exist"));
+        assert_eq!(scope.roots().len(), 1);
+        assert!(scope.check(&s(root.join("sub/a.txt"))).is_ok());
+        let err = scope.check(&s(missing.join("x.txt"))).unwrap_err().to_string();
+        assert!(err.contains("--allow-path") && err.contains("doesn't exist") && err.contains("nonexistent"), "{err}");
+        // A relative rejected folder is also named for an absolute request under it.
+        let cwd = std::env::current_dir().unwrap();
+        let rel = PathScope::new_reporting([std::path::PathBuf::from("no-such-exports-16662")]).0;
+        let err = rel.check(&s(cwd.join("no-such-exports-16662/x.sc"))).unwrap_err().to_string();
+        assert!(err.contains("no-such-exports-16662 was named") && err.contains("doesn't exist"), "{err}");
+        // All given folders invalid: strict fails with every reason; none given is fine.
+        assert_eq!(PathScope::new_strict([missing.clone()]).unwrap_err().len(), 1);
+        assert!(PathScope::new_strict([missing.clone(), root.clone()]).is_ok());
+        assert!(PathScope::new_strict([]).is_ok());
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -954,6 +1203,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn future_destinations_preserve_scope_and_do_not_create_directories() {
+        let root = super::temp_dir().join(format!("solidcraft-vfs-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("plugins/sample/data/value.json");
+        let scope = super::PathScope::new([root.clone()]);
+        assert!(scope.check(&path.to_string_lossy()).is_err(), "ordinary I/O still requires its parent");
+        assert!(scope.check_new(&path.to_string_lossy()).is_ok());
+        super::scoped(Some(scope.clone()), || {
+            assert!(super::check_new(&path.to_string_lossy()).is_ok());
+            assert!(super::check_new(&root.join("../outside/value.json").to_string_lossy()).is_err());
+        });
+        assert!(!root.join("plugins").exists());
+        let design = super::PathScope::default().with_design_folder(&root);
+        assert!(design.check_new(&path.to_string_lossy()).is_ok());
+        assert!(design.check_new(&root.join("plugins/sample/.private/value").to_string_lossy()).is_err());
+        assert!(scope.check_new(&root.join("missing/../../outside").to_string_lossy()).is_err());
+        assert!(super::PathScope::default().check_new(&path.to_string_lossy()).is_err());
+        #[cfg(windows)]
+        for alias in ["plugins/new/.. /.. /outside", "plugins/new/../outside.", "plugins/new/data "] {
+            assert!(scope.check_new(&root.join(alias).to_string_lossy()).is_err(), "{alias}");
+        }
+        #[cfg(unix)]
+        {
+            let outside = root.with_extension("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+            std::os::unix::fs::symlink(root.join("absent"), root.join("dangling")).unwrap();
+            assert!(scope.check_new(&root.join("escape/new/file").to_string_lossy()).is_err());
+            assert!(scope.check_new(&root.join("dangling/new/file").to_string_lossy()).is_err());
+            std::fs::remove_dir_all(outside).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Folders an agent opened or saved a design in (#7181) count as the open design's folder
+    /// does, hidden ones never, and a scope keeps at most `MAX_DESIGN_FOLDERS`: the oldest gives
+    /// way.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_scope_keeps_the_latest_design_folders() {
+        use super::{MAX_DESIGN_FOLDERS, PathScope};
+        let base = super::temp_dir().join(format!("solidcraft-vfs-design-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dirs: Vec<_> = (0..=MAX_DESIGN_FOLDERS).map(|i| base.join(format!("d{i}"))).collect();
+        for d in dirs.iter().chain([&base.join(".hidden")]) {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let scope = dirs
+            .iter()
+            .fold(PathScope::new([]), |s, d| s.with_design_folder(d))
+            .with_design_folder(&dirs[1])
+            .with_design_folder(&base.join(".hidden"));
+        let canon = |d: &std::path::Path| std::fs::canonicalize(d).unwrap();
+        assert_eq!(scope.design_roots().len(), MAX_DESIGN_FOLDERS, "{scope:?}");
+        assert_eq!(scope.design_roots().last(), Some(&canon(&dirs[MAX_DESIGN_FOLDERS])), "{scope:?}");
+        let file = |d: &std::path::Path| d.join("part.solidcraft").to_string_lossy().to_string();
+        assert!(scope.check(&file(&dirs[1])).is_ok());
+        assert!(scope.check(&file(&dirs[0])).is_err(), "the oldest gave way");
+        assert!(scope.check(&file(&base.join(".hidden"))).is_err(), "a hidden folder never counts");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// A save follows a symbolic link to the file it points to (#845), so the link's target is
     /// what a scope judges: a link inside an allowed folder that leads out is refused, a chain of
     /// links that stays inside is fine.
@@ -1097,5 +1411,26 @@ mod tests {
     fn directories_are_not_files() {
         let dir = std::env::temp_dir().to_string_lossy().to_string();
         assert!(super::read(&dir, 1024).is_err());
+    }
+    #[test]
+    fn retained_scope_heap_counts_actual_path_and_vector_capacities_without_exposing_or_changing_roots() {
+        let mut root = std::path::PathBuf::new();
+        root.reserve(512);
+        root.push("/owned/root");
+        let mut design = std::path::PathBuf::new();
+        design.reserve(256);
+        design.push("/owned/design");
+        let mut roots = Vec::with_capacity(4);
+        roots.push(root);
+        let mut design_roots = Vec::with_capacity(3);
+        design_roots.push(design);
+        let expected = ((roots.capacity() + design_roots.capacity()) * std::mem::size_of::<std::path::PathBuf>()
+            + roots[0].capacity()
+            + design_roots[0].capacity()) as u64;
+        let scope = super::PathScope { roots, design_roots, rejected: Vec::new() };
+        let before = scope.clone();
+        assert_eq!(scope.retained_heap_bytes().unwrap(), expected);
+        assert_eq!(scope, before);
+        assert_eq!(super::PathScope::default().retained_heap_bytes().unwrap(), 0);
     }
 }

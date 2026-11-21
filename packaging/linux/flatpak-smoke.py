@@ -19,7 +19,7 @@ import tempfile
 import time
 import zlib
 
-APP_ID = "ai.storyteller.solidcraft"
+APP_ID = "io.tangencylabs.solidcraft"
 MAX_PIXELS = 16_000_000
 MAX_PNG_BYTES = 70_000_000
 SANDBOX_PROBE = r'''
@@ -216,7 +216,6 @@ def run_backend(backend):
         env.pop("WAYLAND_SOCKET", None)
         env.pop("DISPLAY", None)
         env.pop("SOLIDCRAFT_WAYLAND", None)
-        env.pop("SOLVECRAFT_WAYLAND", None)  # the legacy name is still read
         command = ["dbus-run-session", "--"]
         compositor = None
         with (Path(temporary) / "weston.log").open("wb") as log:
